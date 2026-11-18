@@ -121,3 +121,4 @@ Token balances are held in the vault's own contract address on the respective SA
 | `withdraw_emits_event` | `Withdrawn` event emitted |
 | `partial_withdraw_leaves_remainder` | Partial withdrawal, then second withdrawal |
 | `e2e_deploy_via_smart_account` | Deploys via smart account and exercises deposit/withdrawal |
+| `adversarial_reentrancy_withdrawal_attack_fails` | Malicious token callback attempting recursive withdrawal fails and preserves balances |
