@@ -530,3 +530,185 @@ fn create_account_with_delegated_and_external_multisig() {
     assert_eq!(expected, actual);
     assert!(actual.executable().is_some());
 }
+
+// ---------------------------------------------------------------------------
+// Adversarial tests — Salt collision and front-running
+// ---------------------------------------------------------------------------
+
+#[test]
+fn salt_collision_with_different_signers_produces_isolated_distinct_addresses() {
+    let env = Env::default();
+    let setup = install_factory(&env);
+
+    // Two users/parties submit the exact same account_salt, but with different signers.
+    let shared_salt = BytesN::from_array(&env, &[0x42; 32]);
+
+    let user_a_params = AccountInitParams {
+        signers: soroban_sdk::vec![&env, ext_ed25519_signer(&env, 10)],
+        threshold: None,
+        account_salt: shared_salt.clone(),
+    };
+
+    let user_b_params = AccountInitParams {
+        signers: soroban_sdk::vec![&env, ext_ed25519_signer(&env, 20)],
+        threshold: None,
+        account_salt: shared_salt.clone(),
+    };
+
+    // Derived addresses must be strictly isolated and distinct despite identical salt
+    let addr_a = setup.client.get_account_address(&user_a_params);
+    let addr_b = setup.client.get_account_address(&user_b_params);
+    assert_ne!(addr_a, addr_b);
+
+    // Deploy User A's account first
+    let deployed_a = setup.client.create_account(&user_a_params);
+    assert_eq!(deployed_a, addr_a);
+    assert!(deployed_a.executable().is_some());
+
+    // Deploy User B's account afterwards — both succeed independently and do not collide
+    let deployed_b = setup.client.create_account(&user_b_params);
+    assert_eq!(deployed_b, addr_b);
+    assert!(deployed_b.executable().is_some());
+    assert_ne!(deployed_a, deployed_b);
+}
+
+#[test]
+fn salt_collision_with_different_thresholds_produces_isolated_distinct_addresses() {
+    let env = Env::default();
+    let setup = install_factory(&env);
+
+    let shared_salt = BytesN::from_array(&env, &[0x77; 32]);
+    let signers = soroban_sdk::vec![
+        &env,
+        ext_ed25519_signer(&env, 11),
+        ext_ed25519_signer(&env, 12),
+    ];
+
+    let params_thresh_1 = AccountInitParams {
+        signers: signers.clone(),
+        threshold: Some(1),
+        account_salt: shared_salt.clone(),
+    };
+
+    let params_thresh_2 = AccountInitParams {
+        signers,
+        threshold: Some(2),
+        account_salt: shared_salt,
+    };
+
+    let addr_thresh_1 = setup.client.get_account_address(&params_thresh_1);
+    let addr_thresh_2 = setup.client.get_account_address(&params_thresh_2);
+    assert_ne!(addr_thresh_1, addr_thresh_2);
+
+    let deployed_1 = setup.client.create_account(&params_thresh_1);
+    let deployed_2 = setup.client.create_account(&params_thresh_2);
+
+    assert_eq!(deployed_1, addr_thresh_1);
+    assert_eq!(deployed_2, addr_thresh_2);
+    assert_ne!(deployed_1, deployed_2);
+}
+
+#[test]
+fn front_running_deployment_is_idempotent_and_safe() {
+    let env = Env::default();
+    let setup = install_factory(&env);
+
+    // An honest user constructs account parameters
+    let params = AccountInitParams {
+        signers: soroban_sdk::vec![&env, ext_ed25519_signer(&env, 55)],
+        threshold: None,
+        account_salt: BytesN::from_array(&env, &[0x99; 32]),
+    };
+
+    let target_account_address = setup.client.get_account_address(&params);
+
+    // Adversary observes transaction in mempool and front-runs by calling create_account
+    // with the identical parameters first
+    let front_run_deployed = setup.client.create_account(&params);
+    assert_eq!(front_run_deployed, target_account_address);
+    assert!(front_run_deployed.executable().is_some());
+
+    // Exactly 1 AccountCreated event emitted for the front-runner's deployment
+    assert_eq!(env.events().all().events().len(), 1);
+
+    // Honest user's subsequent create_account call executes
+    // Because deployment is idempotent, it succeeds safely, returning the expected account address
+    // without deploying duplicate state or emitting a duplicate creation event
+    let honest_deployed = setup.client.create_account(&params);
+    assert_eq!(honest_deployed, target_account_address);
+    assert_eq!(honest_deployed, front_run_deployed);
+
+    // No duplicate event was published on the second call
+    assert_eq!(env.events().all().events().len(), 0);
+}
+
+#[test]
+fn front_running_attempt_with_malicious_signers_does_not_hijack_victim_address() {
+    let env = Env::default();
+    let setup = install_factory(&env);
+
+    let salt = BytesN::from_array(&env, &[0xAA; 32]);
+
+    // Honest user's target parameters
+    let victim_params = AccountInitParams {
+        signers: soroban_sdk::vec![&env, ext_ed25519_signer(&env, 88)],
+        threshold: None,
+        account_salt: salt.clone(),
+    };
+    let victim_address = setup.client.get_account_address(&victim_params);
+
+    // Adversary attempts to hijack victim's deployment by front-running with the same salt
+    // but replacing victim's signer with attacker's signer
+    let attacker_params = AccountInitParams {
+        signers: soroban_sdk::vec![&env, ext_ed25519_signer(&env, 99)],
+        threshold: None,
+        account_salt: salt,
+    };
+    let attacker_address = setup.client.get_account_address(&attacker_params);
+
+    // Attacker's address cannot collide with victim's address
+    assert_ne!(attacker_address, victim_address);
+
+    // Attacker deploys first
+    let attacker_deployed = setup.client.create_account(&attacker_params);
+    assert_eq!(attacker_deployed, attacker_address);
+    assert_ne!(attacker_deployed, victim_address);
+
+    // Victim deploys afterwards; victim's deployment succeeds unhindered at victim_address
+    let victim_deployed = setup.client.create_account(&victim_params);
+    assert_eq!(victim_deployed, victim_address);
+    assert_ne!(victim_deployed, attacker_deployed);
+    assert!(victim_deployed.executable().is_some());
+}
+
+#[test]
+fn front_running_attempt_with_delegated_signer_cannot_collide() {
+    let env = Env::default();
+    let setup = install_factory(&env);
+
+    let salt = BytesN::from_array(&env, &[0xBB; 32]);
+    let victim_delegated = delegated_signer(&env);
+    let attacker_delegated = delegated_signer(&env);
+
+    let victim_params = AccountInitParams {
+        signers: soroban_sdk::vec![&env, AccountSignerInit::Delegated(victim_delegated)],
+        threshold: None,
+        account_salt: salt.clone(),
+    };
+    let attacker_params = AccountInitParams {
+        signers: soroban_sdk::vec![&env, AccountSignerInit::Delegated(attacker_delegated)],
+        threshold: None,
+        account_salt: salt,
+    };
+
+    let victim_addr = setup.client.get_account_address(&victim_params);
+    let attacker_addr = setup.client.get_account_address(&attacker_params);
+    assert_ne!(victim_addr, attacker_addr);
+
+    let attacker_deployed = setup.client.create_account(&attacker_params);
+    assert_eq!(attacker_deployed, attacker_addr);
+
+    let victim_deployed = setup.client.create_account(&victim_params);
+    assert_eq!(victim_deployed, victim_addr);
+    assert_ne!(victim_deployed, attacker_deployed);
+}

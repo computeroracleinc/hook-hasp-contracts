@@ -476,6 +476,233 @@ fn verify_rejects_wrong_payload() {
     client.verify(&different_hash, &key_data, &sig_data);
 }
 
+// ── adversarial clientDataJSON negative test suite ───────────────────────────
+
+mod adversarial_client_data_tests {
+    use super::*;
+
+    /// Helper to test adversarial clientData payloads against the verifier.
+    fn verify_raw_client_data(raw_client_data: &[u8]) {
+        let e = Env::default();
+        let client = register_verifier(&e);
+        let signing_key = test_signing_key();
+        let pub_key_bytes = public_key_bytes(&signing_key);
+
+        let hash = Bytes::from_array(&e, &TEST_PAYLOAD);
+        let key_data = Bytes::from_slice(&e, &pub_key_bytes);
+
+        let auth_data = build_authenticator_data(valid_flags());
+        let signature = sign_assertion(&e, &signing_key, &auth_data, raw_client_data);
+
+        let sig_struct = WebAuthnSigData {
+            signature: BytesN::<64>::from_array(&e, &signature),
+            authenticator_data: Bytes::from_slice(&e, &auth_data),
+            client_data: Bytes::from_slice(&e, raw_client_data),
+        };
+        let sig_data = sig_struct.to_xdr(&e);
+
+        client.verify(&hash, &key_data, &sig_data);
+    }
+
+    // 1. Missing fields
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_missing_challenge_field() {
+        let client_data = br#"{"type":"webauthn.get","origin":"https://example.com"}"#;
+        verify_raw_client_data(client_data);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_missing_type_field() {
+        let encoded_challenge = base64url_encode(&TEST_PAYLOAD);
+        let challenge_str = std::str::from_utf8(&encoded_challenge).unwrap();
+        let client_data = std::format!(
+            r#"{{"challenge":"{challenge_str}","origin":"https://example.com"}}"#
+        );
+        verify_raw_client_data(client_data.as_bytes());
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_empty_json_object() {
+        verify_raw_client_data(b"{}");
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_empty_payload() {
+        verify_raw_client_data(b"");
+    }
+
+    // 2. Nested objects and unexpected types
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_challenge_as_nested_object() {
+        let encoded_challenge = base64url_encode(&TEST_PAYLOAD);
+        let challenge_str = std::str::from_utf8(&encoded_challenge).unwrap();
+        let client_data = std::format!(
+            r#"{{"type":"webauthn.get","challenge":{{"nested":"{challenge_str}"}},"origin":"https://example.com"}}"#
+        );
+        verify_raw_client_data(client_data.as_bytes());
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_type_as_nested_object() {
+        let encoded_challenge = base64url_encode(&TEST_PAYLOAD);
+        let challenge_str = std::str::from_utf8(&encoded_challenge).unwrap();
+        let client_data = std::format!(
+            r#"{{"type":{{"nested":"webauthn.get"}},"challenge":"{challenge_str}","origin":"https://example.com"}}"#
+        );
+        verify_raw_client_data(client_data.as_bytes());
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_challenge_as_integer() {
+        let client_data = br#"{"type":"webauthn.get","challenge":123456789,"origin":"https://example.com"}"#;
+        verify_raw_client_data(client_data);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_challenge_as_boolean() {
+        let client_data = br#"{"type":"webauthn.get","challenge":true,"origin":"https://example.com"}"#;
+        verify_raw_client_data(client_data);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_challenge_as_array() {
+        let client_data = br#"{"type":"webauthn.get","challenge":["a","b"],"origin":"https://example.com"}"#;
+        verify_raw_client_data(client_data);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_top_level_json_array() {
+        let encoded_challenge = base64url_encode(&TEST_PAYLOAD);
+        let challenge_str = std::str::from_utf8(&encoded_challenge).unwrap();
+        let client_data = std::format!(
+            r#"[{{"type":"webauthn.get","challenge":"{challenge_str}"}}]"#
+        );
+        verify_raw_client_data(client_data.as_bytes());
+    }
+
+    // 3. Truncated and malformed JSON syntax
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_truncated_challenge_value() {
+        let client_data = br#"{"type":"webauthn.get","challenge":"#;
+        verify_raw_client_data(client_data);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_trailing_comma_syntax() {
+        let encoded_challenge = base64url_encode(&TEST_PAYLOAD);
+        let challenge_str = std::str::from_utf8(&encoded_challenge).unwrap();
+        let client_data = std::format!(
+            r#"{{"type":"webauthn.get","challenge":"{challenge_str}",}}"#
+        );
+        verify_raw_client_data(client_data.as_bytes());
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_unquoted_keys() {
+        let encoded_challenge = base64url_encode(&TEST_PAYLOAD);
+        let challenge_str = std::str::from_utf8(&encoded_challenge).unwrap();
+        let client_data = std::format!(
+            r#"{{type:"webauthn.get",challenge:"{challenge_str}"}}"#
+        );
+        verify_raw_client_data(client_data.as_bytes());
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_single_quoted_strings() {
+        let encoded_challenge = base64url_encode(&TEST_PAYLOAD);
+        let challenge_str = std::str::from_utf8(&encoded_challenge).unwrap();
+        let client_data = std::format!(
+            r#"{{'type':'webauthn.get','challenge':'{challenge_str}'}}"#
+        );
+        verify_raw_client_data(client_data.as_bytes());
+    }
+
+    // 4. Escaped characters and mutations
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3114)")]
+    fn verify_rejects_escaped_characters_in_challenge() {
+        let encoded_challenge = base64url_encode(&TEST_PAYLOAD);
+        let challenge_str = std::str::from_utf8(&encoded_challenge).unwrap();
+        // Insert an escaped forward slash or escaped character inside the challenge string
+        let escaped_challenge = challenge_str.replace('b', r#"\/b"#);
+        let client_data = std::format!(
+            r#"{{"type":"webauthn.get","challenge":"{escaped_challenge}","origin":"https://example.com"}}"#
+        );
+        // Deserializes with literal escape or doesn't match expected challenge
+        verify_raw_client_data(client_data.as_bytes());
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_invalid_escape_sequence() {
+        let encoded_challenge = base64url_encode(&TEST_PAYLOAD);
+        let challenge_str = std::str::from_utf8(&encoded_challenge).unwrap();
+        let client_data = std::format!(
+            r#"{{"type":"webauthn.get","challenge":"{challenge_str}\xZZ"}}"#
+        );
+        verify_raw_client_data(client_data.as_bytes());
+    }
+
+    // 5. UTF-8 injection and non-ASCII bytes
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_raw_invalid_utf8_bytes() {
+        // Embed invalid UTF-8 sequence [0xFF, 0xFE, 0xFD] in the JSON
+        let mut client_data = b"{\"type\":\"webauthn.get\",\"challenge\":\"".to_vec();
+        client_data.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
+        client_data.extend_from_slice(b"\"}");
+        verify_raw_client_data(&client_data);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3114)")]
+    fn verify_rejects_unicode_homoglyph_in_challenge() {
+        // Replace ASCII characters with Cyrillic or homoglyphs in challenge
+        let mut encoded_challenge = base64url_encode(&TEST_PAYLOAD).to_vec();
+        encoded_challenge[0] = b'a'; // Ensure starting with known char
+        let rest = std::str::from_utf8(&encoded_challenge[1..]).unwrap();
+        let homoglyph_challenge = std::format!("а{rest}"); // Cyrillic small letter a (U+0430, 2 bytes)
+
+        let client_data = std::format!(
+            r#"{{"type":"webauthn.get","challenge":"{homoglyph_challenge}","origin":"https://example.com"}}"#
+        );
+        verify_raw_client_data(client_data.as_bytes());
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3113)")]
+    fn verify_rejects_unicode_injection_in_type() {
+        let encoded_challenge = base64url_encode(&TEST_PAYLOAD);
+        let challenge_str = std::str::from_utf8(&encoded_challenge).unwrap();
+        // UTF-8 injection in type field (e.g. "webauthn.get\u{0000}" or "webauthn.get🦀")
+        let client_data = std::format!(
+            r#"{{"type":"webauthn.get\u0000","challenge":"{challenge_str}","origin":"https://example.com"}}"#
+        );
+        verify_raw_client_data(client_data.as_bytes());
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3112)")]
+    fn verify_rejects_null_byte_in_json() {
+        let client_data = b"{\"type\":\"webauthn.get\",\"challenge\":\x00\"test\"}";
+        verify_raw_client_data(client_data);
+    }
+}
+
 // ── canonicalize_key tests
 // ────────────────────────────────────────────────────
 

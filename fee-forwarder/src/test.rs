@@ -10,7 +10,7 @@ extern crate std;
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, MockAuth, MockAuthInvoke},
-    vec, Address, Env, IntoVal, MuxedAddress, String, Symbol, TryIntoVal, Val, Vec,
+    vec, Address, Env, IntoVal, MuxedAddress, String, Symbol, TryFromVal, TryIntoVal, Val, Vec,
 };
 use stellar_tokens::fungible::{Base, FungibleToken};
 
@@ -613,4 +613,221 @@ fn constructor_grants_admin_manager_and_executor_roles() {
     assert!(s.fee_forwarder.has_role(&s.manager, &Symbol::new(&e, "manager")).is_some());
     assert!(s.fee_forwarder.has_role(&s.relayer, &Symbol::new(&e, "executor")).is_some());
     assert_eq!(s.fee_forwarder.get_admin(), Some(s.admin.clone()));
+}
+
+// ── call stack depth & cross-contract invocation chain validation ────────────
+
+/// Mock verifier contract that validates an authentication proof/payload.
+#[contract]
+pub struct MockVerifier;
+
+#[contractimpl]
+impl MockVerifier {
+    pub fn verify(_e: Env, payload: Val, proof: Val) -> bool {
+        let _ = (payload, proof);
+        // Validates successfully without exceeding host resource limits
+        true
+    }
+}
+
+/// Mock policy contract that invokes an external verifier to validate policy conditions.
+#[contract]
+pub struct MockPolicy;
+
+#[contractimpl]
+impl MockPolicy {
+    pub fn enforce_with_verifier(e: Env, verifier: Address, payload: Val, proof: Val) -> bool {
+        let verifier_client = MockVerifierClient::new(&e, &verifier);
+        verifier_client.verify(&payload, &proof)
+    }
+}
+
+/// Mock smart account contract that intercepts forwarded calls and evaluates
+/// an attached policy before dispatching.
+#[contract]
+pub struct MockAccount;
+
+#[contractimpl]
+impl MockAccount {
+    pub fn execute_with_policy(
+        e: Env,
+        policy: Address,
+        verifier: Address,
+        payload: Val,
+        proof: Val,
+    ) -> bool {
+        let policy_client = MockPolicyClient::new(&e, &policy);
+        policy_client.enforce_with_verifier(&verifier, &payload, &proof)
+    }
+}
+
+/// Recursive proxy contract to simulate deep call chains up to Soroban's call stack depth limit.
+#[contract]
+pub struct RecursiveProxy;
+
+#[contractimpl]
+impl RecursiveProxy {
+    pub fn recurse_and_call(
+        e: Env,
+        depth_remaining: u32,
+        target_account: Address,
+        policy: Address,
+        verifier: Address,
+        payload: Val,
+        proof: Val,
+    ) -> bool {
+        if depth_remaining > 0 {
+            let proxy_client = RecursiveProxyClient::new(&e, &e.current_contract_address());
+            proxy_client.recurse_and_call(
+                &(depth_remaining - 1),
+                &target_account,
+                &policy,
+                &verifier,
+                &payload,
+                &proof,
+            )
+        } else {
+            let account_client = MockAccountClient::new(&e, &target_account);
+            account_client.execute_with_policy(&policy, &verifier, &payload, &proof)
+        }
+    }
+}
+
+#[test]
+fn test_account_forwarder_policy_verifier_invocation_chain() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // Deploy verifier, policy, and account contracts
+    let verifier_id = e.register(MockVerifier, ());
+    let policy_id = e.register(MockPolicy, ());
+    let account_id = e.register(MockAccount, ());
+
+    let dummy_payload = 42u32.into_val(&e);
+    let dummy_proof = 99u32.into_val(&e);
+
+    let target_args: Vec<Val> = vec![
+        &e,
+        policy_id.to_val(),
+        verifier_id.to_val(),
+        dummy_payload,
+        dummy_proof,
+    ];
+
+    let current_ledger = e.ledger().sequence();
+
+    // Call stack depth of the chain:
+    // Test runner -> FeeForwarder.forward -> MockAccount.execute_with_policy -> MockPolicy.enforce_with_verifier -> MockVerifier.verify
+    let result = s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &account_id,
+        &Symbol::new(&e, "execute_with_policy"),
+        &target_args,
+        &s.user,
+        &s.relayer,
+    );
+
+    let bool_res: bool = bool::try_from_val(&e, &result).unwrap();
+    assert!(bool_res);
+    assert_eq!(s.token.balance(&s.fee_forwarder.address), s.fee_amount);
+}
+
+#[test]
+fn test_invocation_chain_under_maximum_call_stack_depth() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let verifier_id = e.register(MockVerifier, ());
+    let policy_id = e.register(MockPolicy, ());
+    let account_id = e.register(MockAccount, ());
+    let proxy_id = e.register(RecursiveProxy, ());
+
+    let dummy_payload = 123u32.into_val(&e);
+    let dummy_proof = 456u32.into_val(&e);
+
+    // Soroban DEFAULT_HOST_DEPTH_LIMIT is 100 frames.
+    // Call stack breakdown for our invocation:
+    // Frame 1: FeeForwarder.forward
+    // Frame 2..94: RecursiveProxy.recurse_and_call (93 frames, where depth_remaining goes from 92 down to 0)
+    // Frame 95: MockAccount.execute_with_policy
+    // Frame 96: MockPolicy.enforce_with_verifier
+    // Frame 97: MockVerifier.verify
+    // Total nested frames = 97 frames, safely within Soroban's maximum host call stack depth limit (100).
+    let depth_remaining: u32 = 92;
+
+    let target_args: Vec<Val> = vec![
+        &e,
+        depth_remaining.into_val(&e),
+        account_id.to_val(),
+        policy_id.to_val(),
+        verifier_id.to_val(),
+        dummy_payload,
+        dummy_proof,
+    ];
+
+    let current_ledger = e.ledger().sequence();
+
+    let result = s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &proxy_id,
+        &Symbol::new(&e, "recurse_and_call"),
+        &target_args,
+        &s.user,
+        &s.relayer,
+    );
+
+    let bool_res: bool = bool::try_from_val(&e, &result).unwrap();
+    assert!(bool_res);
+    assert_eq!(s.token.balance(&s.fee_forwarder.address), s.fee_amount);
+}
+
+#[test]
+#[should_panic]
+fn test_invocation_chain_exceeding_maximum_call_stack_depth_fails_safely() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let verifier_id = e.register(MockVerifier, ());
+    let policy_id = e.register(MockPolicy, ());
+    let account_id = e.register(MockAccount, ());
+    let proxy_id = e.register(RecursiveProxy, ());
+
+    let dummy_payload = 123u32.into_val(&e);
+    let dummy_proof = 456u32.into_val(&e);
+
+    // Exceeding the 100-frame host depth limit triggers an ExceededLimit host error
+    let excessive_depth: u32 = 100;
+
+    let target_args: Vec<Val> = vec![
+        &e,
+        excessive_depth.into_val(&e),
+        account_id.to_val(),
+        policy_id.to_val(),
+        verifier_id.to_val(),
+        dummy_payload,
+        dummy_proof,
+    ];
+
+    let current_ledger = e.ledger().sequence();
+
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &proxy_id,
+        &Symbol::new(&e, "recurse_and_call"),
+        &target_args,
+        &s.user,
+        &s.relayer,
+    );
 }
