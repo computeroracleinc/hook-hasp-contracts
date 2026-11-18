@@ -16,3 +16,9 @@ stellar-accounts = { workspace = true }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 stellar-accounts = { workspace = true }
 ed25519-dalek = { version = "2.1.1", default-features = false, features = ["rand_core"] }
+
+[[bin]]
+name = "fuzz_ed25519_parser"
+path = "fuzz/fuzz_targets/fuzz_ed25519_parser.rs"
+required-features = ["soroban-sdk/testutils"]
+
