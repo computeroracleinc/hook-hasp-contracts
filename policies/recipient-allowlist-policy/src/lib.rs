@@ -63,29 +63,26 @@ pub struct RecipientData {
 
 /// Error codes for recipient allowlist policy operations.
 ///
-/// This is a standalone, independently-deployed contract, not a module of
-/// the upstream `stellar-accounts` crate, so it is not part of that crate's
-/// shared error-numbering convention (see its `CLAUDE.md`). Numbering starts
-/// fresh at `1`.
+/// Error numbering is standardized in the 300-399 range allocated for policies.
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(u32)]
 pub enum RecipientError {
     /// The smart account does not have a recipient policy installed for this
     /// context rule.
-    SmartAccountNotInstalled = 1,
+    SmartAccountNotInstalled = 300,
     /// Only the `CallContract` context rule type is allowed.
-    OnlyCallContractAllowed = 2,
+    OnlyCallContractAllowed = 301,
     /// `allowed_recipients` was empty or exceeded `MAX_ALLOWED_RECIPIENTS`.
-    InvalidAllowedRecipients = 3,
+    InvalidAllowedRecipients = 302,
     /// The context is not a `Context::Contract` invocation for `transfer`,
     /// or the recipient address is not in the allowlist.
-    RecipientNotAllowed = 4,
+    RecipientNotAllowed = 303,
     /// The policy was already installed for this smart account and context
     /// rule.
-    AlreadyInstalled = 5,
+    AlreadyInstalled = 304,
     /// The call arguments could not be parsed to extract a recipient.
-    InvalidTransferArgs = 6,
+    InvalidTransferArgs = 305,
 }
 
 /// Storage keys for recipient policy data.

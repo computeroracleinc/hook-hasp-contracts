@@ -48,12 +48,13 @@ const HEX_LEN: usize = 64; // 32 bytes * 2 hex chars each
 const SIGNED_MSG_LEN: usize = PREFIX_LEN + HEX_LEN; // 92 bytes total
 
 /// Error codes for the modified Ed25519 verifier.
+/// Standardized in the 200-299 range allocated for verifiers.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ModifiedEd25519VerifierError {
     /// `hash` was not exactly 32 bytes.
-    InvalidHashLength = 1,
+    InvalidHashLength = 200,
 }
 
 #[contract]

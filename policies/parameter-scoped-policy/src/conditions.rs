@@ -104,17 +104,18 @@ pub struct ParameterScopedData {
     pub conditions: Map<Symbol, Vec<Condition>>,
 }
 
+/// Error numbering is standardized in the 300-399 range allocated for policies.
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(u32)]
 pub enum ParameterScopedError {
-    SmartAccountNotInstalled = 1,
-    OnlyCallContractAllowed = 2,
-    InvalidConditions = 3,
-    MethodNotAllowed = 4,
-    ConditionFailed = 5,
-    AlreadyInstalled = 6,
-    ArgumentIndexOutOfBounds = 7,
+    SmartAccountNotInstalled = 300,
+    OnlyCallContractAllowed = 301,
+    InvalidConditions = 302,
+    MethodNotAllowed = 303,
+    ConditionFailed = 304,
+    AlreadyInstalled = 305,
+    ArgumentIndexOutOfBounds = 306,
 }
 
 #[contracttype]

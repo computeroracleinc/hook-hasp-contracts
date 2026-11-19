@@ -595,7 +595,7 @@ fn deploy_contract_rejects_reusing_same_salt() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4000)")] // DeployedContractNotFound
+#[should_panic(expected = "Error(Contract, #100)")] // DeployedContractNotFound
 fn get_deployed_contract_rejects_out_of_range_index() {
     let env = Env::default();
     env.mock_all_auths();
@@ -732,4 +732,60 @@ fn create_contract_rule_rejects_non_matching_signer() {
     env.as_contract(&account_id, || {
         let _ = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
     });
+}
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let account_id = env.register(LatchSmartAccount, ());
+    let client = LatchSmartAccountClient::new(&env, &account_id);
+
+    let signer = Signer::Delegated(Address::generate(&env));
+    let signers = vec![&env, signer.clone()];
+    let rule = client.add_context_rule(
+        &ContextRuleType::Default,
+        &String::from_str(&env, "default"),
+        &None,
+        &signers,
+        &Map::new(&env),
+    );
+
+    let context = Context::Contract(ContractContext {
+        contract: Address::generate(&env),
+        fn_name: Symbol::new(&env, "test"),
+        args: Vec::new(&env),
+    });
+    let auth_contexts = Vec::from_array(&env, [context]);
+    let signatures = create_signatures(&env, &signers, vec![&env, rule.id]);
+    let payload_hash = env.crypto().sha256(&Bytes::from_array(&env, &[1u8; 32]));
+
+    // Reset budget before benchmarking check_auth under Host v22 parameters
+    env.cost_estimate().budget().reset_default();
+
+    env.as_contract(&account_id, || {
+        let _ = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
+    });
+
+    let cpu_cost = env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = env.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
 }

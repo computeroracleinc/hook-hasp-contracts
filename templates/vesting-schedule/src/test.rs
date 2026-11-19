@@ -458,3 +458,40 @@ fn test_end_to_end_deployment_and_claim_via_smart_account() {
     assert_eq!(token_client.balance(&beneficiary), 5_000);
     assert_eq!(token_client.balance(&vesting_id), 0);
 }
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let mut fix = create_fixture();
+
+    // Advance ledger halfway through vesting schedule
+    fix.env.ledger().set_sequence_number(350);
+
+    let beneficiary = Address::generate(&fix.env);
+
+    // Reset budget before benchmarking claim under Host v22 parameters
+    fix.env.cost_estimate().budget().reset_default();
+
+    let released = fix.client.claim(&beneficiary);
+    assert!(released > 0);
+
+    let cpu_cost = fix.env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = fix.env.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
+}

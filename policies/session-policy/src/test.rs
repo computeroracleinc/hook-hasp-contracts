@@ -64,7 +64,7 @@ fn install_success() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #2)")]
+#[should_panic(expected = "Error(Contract, #301)")]
 fn install_rejects_default_rule() {
     let e = Env::default();
     let address = e.register(MockContract, ());
@@ -82,7 +82,7 @@ fn install_rejects_default_rule() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #2)")]
+#[should_panic(expected = "Error(Contract, #301)")]
 fn install_rejects_create_contract_rule() {
     let e = Env::default();
     let address = e.register(MockContract, ());
@@ -101,7 +101,7 @@ fn install_rejects_create_contract_rule() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Contract, #302)")]
 fn install_rejects_empty_allowed_fns() {
     let e = Env::default();
     let address = e.register(MockContract, ());
@@ -118,7 +118,7 @@ fn install_rejects_empty_allowed_fns() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Contract, #302)")]
 fn install_rejects_too_many_allowed_fns() {
     let e = Env::default();
     let address = e.register(MockContract, ());
@@ -139,7 +139,7 @@ fn install_rejects_too_many_allowed_fns() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")]
+#[should_panic(expected = "Error(Contract, #304)")]
 fn install_rejects_already_installed() {
     let e = Env::default();
     let address = e.register(MockContract, ());
@@ -182,7 +182,7 @@ fn enforce_allows_whitelisted_fn() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
+#[should_panic(expected = "Error(Contract, #303)")]
 fn enforce_rejects_non_whitelisted_fn() {
     let e = Env::default();
     let address = e.register(MockContract, ());
@@ -203,7 +203,7 @@ fn enforce_rejects_non_whitelisted_fn() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
+#[should_panic(expected = "Error(Contract, #303)")]
 fn enforce_rejects_create_contract_context() {
     let e = Env::default();
     let address = e.register(MockContract, ());
@@ -228,7 +228,7 @@ fn enforce_rejects_create_contract_context() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #1)")]
+#[should_panic(expected = "Error(Contract, #300)")]
 fn enforce_rejects_when_not_installed() {
     let e = Env::default();
     let address = e.register(MockContract, ());
@@ -244,7 +244,7 @@ fn enforce_rejects_when_not_installed() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
+#[should_panic(expected = "Error(Contract, #303)")]
 fn enforce_rejects_empty_authenticated_signers() {
     let e = Env::default();
     let address = e.register(MockContract, ());
@@ -291,7 +291,7 @@ fn uninstall_success() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #1)")]
+#[should_panic(expected = "Error(Contract, #300)")]
 fn uninstall_rejects_when_not_installed() {
     let e = Env::default();
     let address = e.register(MockContract, ());
@@ -325,4 +325,51 @@ fn get_allowed_fns_returns_installed_value() {
         let allowed_fns = get_allowed_fns(&e, context_rule.id, &smart_account);
         assert_eq!(allowed_fns, vec![&e, symbol_short!("set"), symbol_short!("get")]);
     });
+}
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams {
+            allowed_fns: vec![&e, symbol_short!("transfer")],
+        };
+        install(&e, &params, &context_rule, &smart_account);
+    });
+
+    let context = create_contract_context(&e, symbol_short!("transfer"));
+
+    // Reset budget before benchmarking session policy enforce under Host v22 parameters
+    e.cost_estimate().budget().reset_default();
+
+    e.as_contract(&address, || {
+        enforce(&e, &context, &Vec::new(&e), &context_rule, &smart_account);
+    });
+
+    let cpu_cost = e.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = e.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
 }

@@ -172,3 +172,44 @@ fn batch_canonicalize_key_single_matches_canonicalize_key() {
 
     assert_eq!(batch_result.get(0).unwrap(), single_result);
 }
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let e = Env::default();
+    let client = register_verifier(&e);
+
+    let keypair = test_keypair();
+    let public_key = keypair.verifying_key().to_bytes();
+    let payload = test_payload(&e);
+    let signature = keypair.sign(&TEST_PAYLOAD).to_bytes();
+
+    let key_data = BytesN::<32>::from_array(&e, &public_key);
+    let sig_data = BytesN::<64>::from_array(&e, &signature);
+
+    // Reset budget before benchmarking ed25519 verify under Host v22 parameters
+    e.cost_estimate().budget().reset_default();
+
+    let valid = client.verify(&payload, &key_data, &sig_data);
+    assert!(valid);
+
+    let cpu_cost = e.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = e.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
+}

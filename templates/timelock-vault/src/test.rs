@@ -436,3 +436,42 @@ fn e2e_deploy_via_smart_account() {
     vault_client.withdraw(&token_id.address(), &10_000_000, &account_id);
     assert_eq!(vault_client.get_balance(&token_id.address()), 0);
 }
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let (e, owner, client, token_address, _) = setup_env();
+
+    // Deposit tokens into vault
+    client.deposit(&owner, &token_address, &DEPOSIT_AMOUNT);
+
+    // Fast-forward ledger past unlock point
+    e.ledger().with_mut(|li| {
+        li.sequence_number = UNLOCK_LEDGER + 1;
+    });
+
+    // Reset budget before benchmarking withdrawal under Host v22 parameters
+    e.cost_estimate().budget().reset_default();
+
+    client.withdraw(&token_address, &DEPOSIT_AMOUNT, &owner);
+
+    let cpu_cost = e.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = e.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
+}

@@ -13,16 +13,15 @@ use stellar_accounts::verifiers::Verifier;
 
 /// Input-format errors detected before native P-256 verification.
 ///
-/// Error numbering starts at 1 because this verifier is independently
-/// deployed.
+/// Error numbering is standardized in the 200-299 range allocated for verifiers.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum P256VerifierError {
     /// The Soroban authorization payload hash is not exactly 32 bytes.
-    InvalidHashLength = 1,
+    InvalidHashLength = 200,
     /// The public key does not use the required uncompressed SEC1 prefix.
-    InvalidKeyEncoding = 2,
+    InvalidKeyEncoding = 201,
 }
 
 /// Deployable singleton for raw P-256 signature verification.

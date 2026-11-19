@@ -88,7 +88,7 @@ fn verify_valid_signature() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #1)")]
+#[should_panic(expected = "Error(Contract, #200)")]
 fn verify_rejects_short_hash() {
     let e = Env::default();
     let client = register_verifier(&e);
@@ -98,7 +98,7 @@ fn verify_rejects_short_hash() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #1)")]
+#[should_panic(expected = "Error(Contract, #200)")]
 fn verify_rejects_long_hash() {
     let e = Env::default();
     let client = register_verifier(&e);
@@ -108,7 +108,7 @@ fn verify_rejects_long_hash() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Contract, #202)")]
 fn verify_rejects_wrong_digest() {
     let e = Env::default();
     let client = register_verifier(&e);
@@ -118,7 +118,7 @@ fn verify_rejects_wrong_digest() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Contract, #202)")]
 fn verify_rejects_wrong_key() {
     let e = Env::default();
     let client = register_verifier(&e);
@@ -129,7 +129,7 @@ fn verify_rejects_wrong_key() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Contract, #202)")]
 fn verify_rejects_wrong_recovery_id() {
     let e = Env::default();
     let client = register_verifier(&e);
@@ -141,7 +141,7 @@ fn verify_rejects_wrong_recovery_id() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Contract, #202)")]
 fn verify_rejects_modified_r() {
     let e = Env::default();
     let client = register_verifier(&e);
@@ -153,7 +153,7 @@ fn verify_rejects_modified_r() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Contract, #202)")]
 fn verify_rejects_modified_s() {
     let e = Env::default();
     let client = register_verifier(&e);
@@ -165,7 +165,7 @@ fn verify_rejects_modified_s() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #2)")]
+#[should_panic(expected = "Error(Contract, #201)")]
 fn verify_rejects_disallowed_prefix() {
     let e = Env::default();
     let client = register_verifier(&e);
@@ -177,7 +177,7 @@ fn verify_rejects_disallowed_prefix() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #2)")]
+#[should_panic(expected = "Error(Contract, #201)")]
 fn verify_rejects_compressed_point_prefix_in_65_byte_input() {
     let e = Env::default();
     let client = register_verifier(&e);
@@ -189,7 +189,7 @@ fn verify_rejects_compressed_point_prefix_in_65_byte_input() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Contract, #202)")]
 fn verify_rejects_invalid_curve_point() {
     let e = Env::default();
     let client = register_verifier(&e);
@@ -201,19 +201,19 @@ fn verify_rejects_invalid_curve_point() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
+#[should_panic(expected = "Error(Contract, #203)")]
 fn verify_rejects_recovery_id_2() {
     assert_recovery_id_rejected(2);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
+#[should_panic(expected = "Error(Contract, #203)")]
 fn verify_rejects_ethereum_recovery_id_27() {
     assert_recovery_id_rejected(27);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
+#[should_panic(expected = "Error(Contract, #203)")]
 fn verify_rejects_ethereum_recovery_id_28() {
     assert_recovery_id_rejected(28);
 }
@@ -292,7 +292,7 @@ fn canonicalize_key_preserves_distinct_keys() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #2)")]
+#[should_panic(expected = "Error(Contract, #201)")]
 fn canonicalize_key_rejects_disallowed_prefix() {
     let e = Env::default();
     let client = register_verifier(&e);
@@ -338,7 +338,7 @@ fn batch_canonicalize_key_accepts_empty_input() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #2)")]
+#[should_panic(expected = "Error(Contract, #201)")]
 fn batch_canonicalize_key_rejects_disallowed_prefix() {
     let e = Env::default();
     let client = register_verifier(&e);
@@ -375,4 +375,38 @@ fn verifier_calls_write_no_contract_storage() {
     });
 
     std::println!("representative native verify resources: {verify_resources:#?}");
+}
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let e = Env::default();
+    let address = e.register(Secp256k1Verifier, ());
+    let client = Secp256k1VerifierClient::new(&e, &address);
+    let (hash, public_key, signature) = valid_inputs(&e);
+
+    // Reset budget before benchmarking secp256k1 verify under Host v22 parameters
+    e.cost_estimate().budget().reset_default();
+
+    assert!(client.verify(&hash, &public_key, &signature));
+
+    let cpu_cost = e.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = e.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
 }

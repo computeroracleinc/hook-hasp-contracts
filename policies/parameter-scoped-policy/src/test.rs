@@ -118,7 +118,7 @@ fn test_operator_eq_accept() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")]
+#[should_panic(expected = "Error(Contract, #304)")]
 fn test_operator_eq_reject() {
     run_operator_test(Operator::Eq, 100, 101);
 }
@@ -129,7 +129,7 @@ fn test_operator_neq_accept() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")]
+#[should_panic(expected = "Error(Contract, #304)")]
 fn test_operator_neq_reject() {
     run_operator_test(Operator::Neq, 100, 100);
 }
@@ -140,13 +140,13 @@ fn test_operator_gt_accept() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")]
+#[should_panic(expected = "Error(Contract, #304)")]
 fn test_operator_gt_reject_equal() {
     run_operator_test(Operator::Gt, 100, 100);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")]
+#[should_panic(expected = "Error(Contract, #304)")]
 fn test_operator_gt_reject_less() {
     run_operator_test(Operator::Gt, 100, 99);
 }
@@ -162,7 +162,7 @@ fn test_operator_gte_accept_equal() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")]
+#[should_panic(expected = "Error(Contract, #304)")]
 fn test_operator_gte_reject() {
     run_operator_test(Operator::Gte, 100, 99);
 }
@@ -173,13 +173,13 @@ fn test_operator_lt_accept() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")]
+#[should_panic(expected = "Error(Contract, #304)")]
 fn test_operator_lt_reject_equal() {
     run_operator_test(Operator::Lt, 100, 100);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")]
+#[should_panic(expected = "Error(Contract, #304)")]
 fn test_operator_lt_reject_greater() {
     run_operator_test(Operator::Lt, 100, 101);
 }
@@ -195,7 +195,7 @@ fn test_operator_lte_accept_equal() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")]
+#[should_panic(expected = "Error(Contract, #304)")]
 fn test_operator_lte_reject() {
     run_operator_test(Operator::Lte, 100, 101);
 }
@@ -237,7 +237,7 @@ fn test_type_i32_accept() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")]
+#[should_panic(expected = "Error(Contract, #304)")]
 fn test_type_u64_reject() {
     let (e, smart_account, _, target, policy_id) = setup();
     let rule = create_context_rule(&e, &target);
@@ -338,7 +338,7 @@ fn test_type_u128_accept() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")]
+#[should_panic(expected = "Error(Contract, #304)")]
 fn test_type_i128_reject() {
     let (e, smart_account, _, target, policy_id) = setup();
     let rule = create_context_rule(&e, &target);
@@ -411,7 +411,7 @@ fn test_type_sym_accept() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")]
+#[should_panic(expected = "Error(Contract, #304)")]
 fn test_type_addr_reject() {
     let (e, smart_account, _, target, policy_id) = setup();
     let rule = create_context_rule(&e, &target);
@@ -454,7 +454,7 @@ fn test_type_addr_reject() {
 // ==========================================
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Contract, #302)")]
 fn test_install_sym_rejects_invalid_operator() {
     let (e, smart_account, _, target, policy_id) = setup();
     let rule = create_context_rule(&e, &target);
@@ -481,7 +481,7 @@ fn test_install_sym_rejects_invalid_operator() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Contract, #302)")]
 fn test_install_addr_rejects_invalid_operator() {
     let (e, smart_account, _, target, policy_id) = setup();
     let rule = create_context_rule(&e, &target);
@@ -508,7 +508,7 @@ fn test_install_addr_rejects_invalid_operator() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #7)")]
+#[should_panic(expected = "Error(Contract, #306)")]
 fn test_enforce_fails_index_out_of_bounds() {
     let (e, smart_account, _, target, policy_id) = setup();
     let rule = create_context_rule(&e, &target);
@@ -545,7 +545,7 @@ fn test_enforce_fails_index_out_of_bounds() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
+#[should_panic(expected = "Error(Contract, #303)")]
 fn test_enforce_fails_unconfigured_function() {
     let (e, smart_account, _, target, policy_id) = setup();
     let rule = create_context_rule(&e, &target);
@@ -578,4 +578,63 @@ fn test_enforce_fails_unconfigured_function() {
     e.as_contract(&policy_id, || {
         conditions::enforce(&e, &context, &signers, &rule, &smart_account);
     });
+}
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let (e, smart_account, _, target, policy_id) = setup();
+    let rule = create_context_rule(&e, &target);
+
+    let mut conditions = Map::new(&e);
+    conditions.set(
+        Symbol::new(&e, "transfer"),
+        Vec::from_array(
+            &e,
+            [Condition {
+                arg_index: 0,
+                operator: Operator::Eq,
+                expected_value: ExpectedValue::U32(50),
+            }],
+        ),
+    );
+
+    e.as_contract(&policy_id, || {
+        conditions::install(
+            &e,
+            &ParameterScopedAccountParams { conditions },
+            &rule,
+            &smart_account,
+        );
+    });
+
+    let context = create_contract_context(&e, &target, "transfer", soroban_sdk::vec![&e, 50u32.into_val(&e)]);
+    let signers = Vec::from_array(&e, [Signer::Delegated(Address::generate(&e))]);
+
+    // Reset budget before benchmarking parameter scoped enforce under Host v22 parameters
+    e.cost_estimate().budget().reset_default();
+
+    e.as_contract(&policy_id, || {
+        conditions::enforce(&e, &context, &signers, &rule, &smart_account);
+    });
+
+    let cpu_cost = e.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = e.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
 }

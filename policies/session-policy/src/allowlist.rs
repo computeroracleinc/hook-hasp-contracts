@@ -67,25 +67,24 @@ pub struct SessionData {
 ///
 /// This is a standalone, independently-deployed contract, not a module of
 /// the upstream `stellar-accounts` crate, so it is not part of that crate's
-/// shared error-numbering convention (see its `CLAUDE.md`). Numbering starts
-/// fresh at `1`.
+/// Error numbering is standardized in the 300-399 range allocated for policies.
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(u32)]
 pub enum SessionError {
     /// The smart account does not have a session policy installed for this
     /// context rule.
-    SmartAccountNotInstalled = 1,
+    SmartAccountNotInstalled = 300,
     /// Only the `CallContract` context rule type is allowed.
-    OnlyCallContractAllowed = 2,
+    OnlyCallContractAllowed = 301,
     /// `allowed_fns` was empty or exceeded `MAX_ALLOWED_FNS`.
-    InvalidAllowedFns = 3,
+    InvalidAllowedFns = 302,
     /// The context's function name is not in the allowlist, or the context
     /// is not a `Context::Contract` variant.
-    MethodNotAllowed = 4,
+    MethodNotAllowed = 303,
     /// The policy was already installed for this smart account and context
     /// rule.
-    AlreadyInstalled = 5,
+    AlreadyInstalled = 304,
 }
 
 /// Storage keys for session policy data.
