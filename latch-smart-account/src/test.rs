@@ -2,7 +2,7 @@
 
 extern crate std;
 
-use session_policy::{SessionAccountParams, SessionPolicy};
+use session_policy::{SessionAccountParams, SessionPolicy, SessionPolicyClient};
 use soroban_sdk::{
     auth::{
         Context, ContractContext, ContractExecutable, CreateContractWithConstructorHostFnContext,
@@ -286,7 +286,7 @@ fn create_signatures(e: &Env, signers: &Vec<Signer>, context_rule_ids: Vec<u32>)
 fn setup_session_rule<'a>(
     env: &'a Env,
     allowed_fns: Vec<Symbol>,
-) -> (Address, LatchSmartAccountClient<'a>, Address, u32, Vec<Signer>) {
+) -> (Address, LatchSmartAccountClient<'a>, Address, u32, Vec<Signer>, Address) {
     env.mock_all_auths();
 
     let owner_signers = default_signers(env);
@@ -310,13 +310,13 @@ fn setup_session_rule<'a>(
     let install_param: Val = SessionAccountParams { allowed_fns }.into_val(env);
     client.add_policy(&rule.id, &session_policy_id, &install_param);
 
-    (account_id, client, target_id, rule.id, session_signers)
+    (account_id, client, target_id, rule.id, session_signers, session_policy_id)
 }
 
 #[test]
 fn session_signer_allowed_call_succeeds() {
     let env = Env::default();
-    let (account_id, _client, target_id, rule_id, session_signers) =
+    let (account_id, _client, target_id, rule_id, session_signers, _) =
         setup_session_rule(&env, vec![&env, Symbol::new(&env, "set")]);
 
     let context = get_context(target_id, Symbol::new(&env, "set"), vec![&env, 7u32.into_val(&env)]);
@@ -334,7 +334,7 @@ fn session_signer_allowed_call_succeeds() {
 #[should_panic(expected = "Error(Contract, #4)")]
 fn session_signer_disallowed_method_rejected() {
     let env = Env::default();
-    let (account_id, _client, target_id, rule_id, session_signers) =
+    let (account_id, _client, target_id, rule_id, session_signers, _) =
         setup_session_rule(&env, vec![&env, Symbol::new(&env, "set")]);
 
     // "get" is not in the allowlist, only "set" is.
@@ -395,7 +395,7 @@ fn session_call_after_valid_until_expiry_rejected() {
 #[should_panic(expected = "Error(Contract, #3000)")]
 fn session_call_after_remove_context_rule_rejected() {
     let env = Env::default();
-    let (account_id, client, target_id, rule_id, session_signers) =
+    let (account_id, client, target_id, rule_id, session_signers, _) =
         setup_session_rule(&env, vec![&env, Symbol::new(&env, "set")]);
 
     client.remove_context_rule(&rule_id);
@@ -404,6 +404,37 @@ fn session_call_after_remove_context_rule_rejected() {
     let auth_contexts = Vec::from_array(&env, [context]);
     let signatures = create_signatures(&env, &session_signers, vec![&env, rule_id]);
     let payload_hash = env.crypto().sha256(&Bytes::from_array(&env, &[1u8; 32]));
+
+    env.as_contract(&account_id, || {
+        let _ = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
+    });
+}
+
+/// A session that authenticates successfully can be cancelled immediately by
+/// the account owner through the policy's revocation bitmap; the same
+/// signature is rejected on the very next authorization attempt without
+/// touching the account's context rule.
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn revoked_session_call_rejected_by_account_auth() {
+    let env = Env::default();
+    let (account_id, _client, target_id, rule_id, session_signers, policy_id) =
+        setup_session_rule(&env, vec![&env, Symbol::new(&env, "set")]);
+
+    let context = get_context(target_id, Symbol::new(&env, "set"), vec![&env, 7u32.into_val(&env)]);
+    let auth_contexts = Vec::from_array(&env, [context]);
+    let signatures = create_signatures(&env, &session_signers, vec![&env, rule_id]);
+    let payload_hash = env.crypto().sha256(&Bytes::from_array(&env, &[1u8; 32]));
+
+    env.as_contract(&account_id, || {
+        let result = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
+        assert!(result.is_ok());
+    });
+
+    let policy_client = SessionPolicyClient::new(&env, &policy_id);
+    assert!(!policy_client.is_revoked(&rule_id, &account_id));
+    policy_client.revoke_session(&rule_id, &account_id);
+    assert!(policy_client.is_revoked(&rule_id, &account_id));
 
     env.as_contract(&account_id, || {
         let _ = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);

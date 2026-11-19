@@ -99,7 +99,7 @@ OZ weighted threshold policy — each signer gets an individual weight, and a mi
 
 ### Session Policy — `policies/session-policy/` ✅
 
-Restricts a context rule's signers to an allow-listed set of contract function names — the building block behind hook-hasp session keys. Own logic, not a wrapper around an OZ primitive.
+Restricts a context rule's signers to an allow-listed set of contract function names — the building block behind hook-hasp session keys. Own logic, not a wrapper around an OZ primitive. Also maintains a per-account revocation bitmap: the owner can call `revoke_session(session_id, smart_account)` to invalidate a session before its `valid_until`, and the next authorization attempt fails immediately with `SessionRevoked` (#6) without removing the account's context rule.
 
 ### Spending Limit Policy — `policies/spending-limit-policy/` ✅
 

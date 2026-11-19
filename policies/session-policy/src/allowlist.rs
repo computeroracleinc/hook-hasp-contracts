@@ -6,11 +6,12 @@
 //! ephemeral signer with this policy so the session key may only invoke the
 //! allowlisted functions on that one contract.
 //!
-//! Session expiry and revocation are intentionally not reimplemented here —
-//! they are already provided by the smart account's own `ContextRule`
-//! machinery (`valid_until` and `remove_context_rule`). This policy only
-//! adds the one thing the account model doesn't already provide: narrowing
-//! a `CallContract` rule down to specific function names.
+//! Session expiry is provided by the smart account's own `ContextRule`
+//! machinery (`valid_until`). This policy narrows a `CallContract` rule down
+//! to specific function names and adds an immediate revocation mechanism: the
+//! account owner can flip a bit in a per-account revocation bitmap to cancel a
+//! session before its natural expiry, without altering the account's rule
+//! structure.
 use soroban_sdk::{
     auth::{Context, ContractContext},
     contracterror, contractevent, contracttype, panic_with_error, Address, Env, Symbol, Vec,
@@ -44,6 +45,15 @@ pub struct SessionUninstalled {
     #[topic]
     pub smart_account: Address,
     pub context_rule_id: u32,
+}
+
+/// Event emitted when the account owner revokes a session.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SessionRevoked {
+    #[topic]
+    pub smart_account: Address,
+    pub session_id: u32,
 }
 
 /// Installation parameters for the session (method allowlist) policy.
@@ -86,6 +96,10 @@ pub enum SessionError {
     /// The policy was already installed for this smart account and context
     /// rule.
     AlreadyInstalled = 5,
+    /// The session has been revoked and can no longer be used.
+    SessionRevoked = 6,
+    /// The session was already revoked.
+    SessionAlreadyRevoked = 7,
 }
 
 /// Storage keys for session policy data.
@@ -93,6 +107,10 @@ pub enum SessionError {
 pub enum SessionStorageKey {
     /// Storage key for the allowlist of a smart account context rule.
     AccountContext(Address, u32),
+    /// Storage key for one word of a smart account's revocation bitmap. The
+    /// `u32` is the word index (`session_id / 64`); each set bit marks the
+    /// session whose ID is `word_index * 64 + bit` as revoked.
+    RevocationBitmap(Address, u32),
 }
 
 // ################## CONSTANTS ##################
@@ -104,6 +122,10 @@ pub const SESSION_TTL_THRESHOLD: u32 = SESSION_EXTEND_AMOUNT - DAY_IN_LEDGERS;
 /// Maximum number of allowed function names per session policy.
 /// Bounds the linear scan performed in `enforce` and the storage size.
 pub const MAX_ALLOWED_FNS: u32 = 10;
+
+/// Number of session IDs tracked by a single revocation bitmap word.
+/// Bounded by the width of `u64`, keeping one storage entry per 64 sessions.
+pub const REVOCATION_BITS_PER_WORD: u32 = u64::BITS;
 
 // ################## QUERY STATE ##################
 
@@ -131,11 +153,41 @@ pub fn get_allowed_fns(e: &Env, context_rule_id: u32, smart_account: &Address) -
         .unwrap_or_else(|| panic_with_error!(e, SessionError::SmartAccountNotInstalled))
 }
 
+/// Returns whether a session ID has been revoked for the given smart account.
+///
+/// The revocation bitmap is stored as sparse `u64` words, so checking a
+/// session reads only its own word. The word's TTL is refreshed on read so a
+/// long-lived revocation cannot expire while its session is still active.
+///
+/// # Arguments
+///
+/// * `e` - Access to the Soroban environment.
+/// * `session_id` - The context rule ID identifying the session.
+/// * `smart_account` - The address of the smart account.
+pub fn is_revoked(e: &Env, session_id: u32, smart_account: &Address) -> bool {
+    let (word_index, bit) = bitmap_position(session_id);
+    let key = SessionStorageKey::RevocationBitmap(smart_account.clone(), word_index);
+    e.storage()
+        .persistent()
+        .get::<_, u64>(&key)
+        .map(|word| {
+            e.storage().persistent().extend_ttl(&key, SESSION_TTL_THRESHOLD, SESSION_EXTEND_AMOUNT);
+            word & (1u64 << bit) != 0
+        })
+        .unwrap_or(false)
+}
+
+/// Splits a session ID into the index of its bitmap word and its bit within
+/// that word.
+fn bitmap_position(session_id: u32) -> (u32, u32) {
+    (session_id / REVOCATION_BITS_PER_WORD, session_id % REVOCATION_BITS_PER_WORD)
+}
+
 // ################## CHANGE STATE ##################
 
-/// Enforces the session policy: the context must be a `Context::Contract`
-/// invocation whose `fn_name` is in the installed allowlist. Requires
-/// authorization from the smart account.
+/// Enforces the session policy: the session must not have been revoked, and
+/// the context must be a `Context::Contract` invocation whose `fn_name` is in
+/// the installed allowlist. Requires authorization from the smart account.
 ///
 /// # Arguments
 ///
@@ -147,6 +199,8 @@ pub fn get_allowed_fns(e: &Env, context_rule_id: u32, smart_account: &Address) -
 ///
 /// # Errors
 ///
+/// * [`SessionError::SessionRevoked`] - When the account owner has revoked the
+///   session before its natural expiry.
 /// * [`SessionError::MethodNotAllowed`] - When there are no authenticated
 ///   signers, the context is not a `Context::Contract` invocation, or the
 ///   function name is not in the allowlist.
@@ -168,6 +222,10 @@ pub fn enforce(
 
     if authenticated_signers.is_empty() {
         panic_with_error!(e, SessionError::MethodNotAllowed)
+    }
+
+    if is_revoked(e, context_rule.id, smart_account) {
+        panic_with_error!(e, SessionError::SessionRevoked)
     }
 
     let allowed_fns = get_allowed_fns(e, context_rule.id, smart_account);
@@ -282,4 +340,55 @@ pub fn uninstall(e: &Env, context_rule: &ContextRule, smart_account: &Address) {
 
     SessionUninstalled { smart_account: smart_account.clone(), context_rule_id: context_rule.id }
         .publish(e);
+}
+
+/// Revokes a session by setting its bit in the smart account's revocation
+/// bitmap. The bit is checked by [`enforce`] on the very next call, giving the
+/// account owner an immediate cancellation mechanism that does not depend on
+/// the session's `valid_until` or require removing its context rule.
+///
+/// Requires authorization from the smart account, so only its owner (through
+/// the account's own authorization) can revoke a session. Context rule IDs are
+/// never reused by an account, so a revocation remains effective for the
+/// lifetime of that session ID.
+///
+/// # Arguments
+///
+/// * `e` - Access to the Soroban environment.
+/// * `session_id` - The context rule ID identifying the session to revoke.
+/// * `smart_account` - The address of the smart account.
+///
+/// # Errors
+///
+/// * [`SessionError::SmartAccountNotInstalled`] - When no session policy is
+///   installed for this smart account and session ID.
+/// * [`SessionError::SessionAlreadyRevoked`] - When the session was already
+///   revoked.
+///
+/// # Events
+///
+/// * topics - `["session_revoked", smart_account: Address]`
+/// * data - `[session_id: u32]`
+pub fn revoke_session(e: &Env, session_id: u32, smart_account: &Address) {
+    // Require authorization from the smart_account (i.e. its owner).
+    smart_account.require_auth();
+
+    let session_key = SessionStorageKey::AccountContext(smart_account.clone(), session_id);
+    if !e.storage().persistent().has(&session_key) {
+        panic_with_error!(e, SessionError::SmartAccountNotInstalled)
+    }
+
+    let (word_index, bit) = bitmap_position(session_id);
+    let bitmap_key = SessionStorageKey::RevocationBitmap(smart_account.clone(), word_index);
+    let mask = 1u64 << bit;
+    let word = e.storage().persistent().get::<_, u64>(&bitmap_key).unwrap_or(0);
+
+    if word & mask != 0 {
+        panic_with_error!(e, SessionError::SessionAlreadyRevoked)
+    }
+
+    e.storage().persistent().set(&bitmap_key, &(word | mask));
+    e.storage().persistent().extend_ttl(&bitmap_key, SESSION_TTL_THRESHOLD, SESSION_EXTEND_AMOUNT);
+
+    SessionRevoked { smart_account: smart_account.clone(), session_id }.publish(e);
 }
