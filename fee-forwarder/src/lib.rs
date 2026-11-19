@@ -81,6 +81,23 @@ impl FeeForwarder {
     /// picks up the request) and `relayer` (who must hold the `executor`
     /// role).
     ///
+    /// # Arguments
+    ///
+    /// * `e` - Access to the Soroban environment.
+    /// * `fee_token` - The address of the token used to pay the forwarding fee.
+    /// * `fee_amount` - The fee charged to the user.
+    /// * `max_fee_amount` - The maximum allowable fee authorized by the user.
+    /// * `expiration_ledger` - The ledger sequence after which the authorization expires.
+    /// * `target_contract` - The address of the destination contract to invoke.
+    /// * `target_fn` - The name of the destination function to call.
+    /// * `target_args` - Arguments passed to the destination function.
+    /// * `user` - The user authorizing the fee payment and destination call.
+    /// * `relayer` - The relayer submitting the call (must have `executor` role).
+    ///
+    /// # Returns
+    ///
+    /// Returns the result of invoking `target_contract.target_fn(target_args)`.
+    ///
     /// # Errors
     ///
     /// * [`stellar_fee_abstraction::FeeAbstractionError::FeeTokenNotAllowed`]
@@ -125,12 +142,32 @@ impl FeeForwarder {
     }
 
     /// Adds `token` to the fee-token allowlist. Manager-gated.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - Access to the Soroban environment.
+    /// * `token` - The address of the fee token to allow.
+    /// * `operator` - The address performing the action (must hold the `manager` role).
+    ///
+    /// # Errors
+    ///
+    /// * [`stellar_access::access_control::AccessControlError::Unauthorized`] - If `operator` lacks `manager` role.
     #[only_role(operator, "manager")]
     pub fn enable_fee_token(e: &Env, token: Address, operator: Address) {
         set_allowed_fee_token(e, &token, true);
     }
 
     /// Removes `token` from the fee-token allowlist. Manager-gated.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - Access to the Soroban environment.
+    /// * `token` - The address of the fee token to disallow.
+    /// * `operator` - The address performing the action (must hold the `manager` role).
+    ///
+    /// # Errors
+    ///
+    /// * [`stellar_access::access_control::AccessControlError::Unauthorized`] - If `operator` lacks `manager` role.
     #[only_role(operator, "manager")]
     pub fn disable_fee_token(e: &Env, token: Address, operator: Address) {
         set_allowed_fee_token(e, &token, false);
@@ -138,6 +175,21 @@ impl FeeForwarder {
 
     /// Transfers this contract's entire balance of `token` to `recipient`.
     /// Manager-gated. Returns the amount swept.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - Access to the Soroban environment.
+    /// * `token` - The token to sweep.
+    /// * `recipient` - The destination address for swept tokens.
+    /// * `operator` - The address performing the action (must hold the `manager` role).
+    ///
+    /// # Returns
+    ///
+    /// The total amount of `token` swept to `recipient`.
+    ///
+    /// # Errors
+    ///
+    /// * [`stellar_access::access_control::AccessControlError::Unauthorized`] - If `operator` lacks `manager` role.
     #[only_role(operator, "manager")]
     pub fn sweep_tokens(e: &Env, token: Address, recipient: Address, operator: Address) -> i128 {
         sweep_token(e, &token, &recipient)

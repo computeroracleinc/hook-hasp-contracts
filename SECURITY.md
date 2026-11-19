@@ -78,6 +78,11 @@ supply-chain integrity checks:
 - **Dependency & License Gates (`deny.toml`, `cargo-audit`, Dependency Review,
   CodeQL)** — Blocks vulnerable, yanked, unsound, copyleft, or non-crates.io
   dependencies on every PR and weekly scheduled run.
+- **Upstream OpenZeppelin Drift & Security Advisory Audit (`scripts/check_upstream_drift.py`)** —
+  Continuously monitors upstream `OpenZeppelin/stellar-contracts` for new releases,
+  security advisories (GHSA), and patch notifications. Alerts maintainers in CI
+  whenever the pinned workspace dependency version drifts or requires an upstream
+  security fix.
 
 Contributors should enable the local pre-commit hook once per clone:
 

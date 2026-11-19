@@ -10,5 +10,6 @@ pub struct DummySingleton;
 
 #[contractimpl]
 impl DummySingleton {
+    /// No-op constructor for test dummy singleton verifier and policy contracts.
     pub fn __constructor(_env: Env) {}
 }

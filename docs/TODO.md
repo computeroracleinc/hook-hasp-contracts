@@ -31,6 +31,10 @@ Tracking known gaps and follow-ups.
 
 ## CI
 
+- [x] **Pin all GitHub Actions to exact full-length commit SHAs.** Tag hijacking prevention:
+      all actions across `.github/workflows/` (`codeql.yml`, `rust.yml`, `security-malware.yml`,
+      `typos.yml`) are pinned to 40-character commit SHAs, audited and verified by
+      `./scripts/security_malware_check.sh`.
 - [x] **CI never verifies the WASM build actually succeeds.** Closed
       2026-09-02: `rust.yml` now has a `wasm-build` job that runs
       `stellar contract build` over the whole workspace (prebuilt stellar-cli

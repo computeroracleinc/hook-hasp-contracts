@@ -110,6 +110,26 @@ impl Contract {
         env.storage().instance().extend_ttl(100, 1_555_200);
     }
 
+    /// Computes the deterministic smart account address that will be deployed
+    /// for the given initialization parameters without actually deploying it.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - Access to the Soroban environment.
+    /// * `params` - Initialization parameters specifying the initial signers, threshold, and deploy salt.
+    ///
+    /// # Returns
+    ///
+    /// The deterministic address of the smart account.
+    ///
+    /// # Errors
+    ///
+    /// * [`FactoryError::NoSigners`] - If `signers` is empty.
+    /// * [`FactoryError::DuplicateSigner`] - If duplicate signers are detected after canonicalization.
+    /// * [`FactoryError::MissingThreshold`] - If threshold is missing when more than 1 signer is provided.
+    /// * [`FactoryError::InvalidThreshold`] - If threshold is 0 or exceeds the number of signers.
+    /// * [`FactoryError::InvalidEd25519Key`] - If an Ed25519 signer key length is not 32 bytes.
+    /// * [`FactoryError::InvalidWebAuthnKey`] - If a WebAuthn public key is less than 65 bytes or does not start with `0x04`.
     pub fn get_account_address(env: Env, params: AccountInitParams) -> Address {
         let normalized = normalize_params(&env, params);
         env.deployer()
@@ -117,6 +137,33 @@ impl Contract {
             .deployed_address()
     }
 
+    /// Deploys a new Latch smart account configured with the specified signers
+    /// and threshold policy. If an account at the deterministic address already exists,
+    /// returns its address idempotently without attempting redeployment.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - Access to the Soroban environment.
+    /// * `params` - Initialization parameters specifying initial signers, threshold, and deploy salt.
+    ///
+    /// # Returns
+    ///
+    /// The address of the deployed (or existing) smart account.
+    ///
+    /// # Errors
+    ///
+    /// * [`FactoryError::MissingConfig`] - If factory configuration is not set.
+    /// * [`FactoryError::NoSigners`] - If `signers` is empty.
+    /// * [`FactoryError::DuplicateSigner`] - If duplicate signers are detected.
+    /// * [`FactoryError::MissingThreshold`] - If threshold is omitted when multiple signers exist.
+    /// * [`FactoryError::InvalidThreshold`] - If threshold is zero or greater than the number of signers.
+    /// * [`FactoryError::InvalidEd25519Key`] - If an Ed25519 signer key length is not 32 bytes.
+    /// * [`FactoryError::InvalidWebAuthnKey`] - If a WebAuthn public key is invalid.
+    ///
+    /// # Events
+    ///
+    /// * topics - `["account_created"]`
+    /// * data - `[account: Address]`
     pub fn create_account(env: Env, params: AccountInitParams) -> Address {
         let config = get_config(&env);
         let normalized = normalize_params(&env, params);
@@ -137,6 +184,20 @@ impl Contract {
         account
     }
 
+    /// Retrieves the configured verifier contract address for a given signer kind.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - Access to the Soroban environment.
+    /// * `signer_kind` - The kind of signer (`Ed25519` or `WebAuthn`).
+    ///
+    /// # Returns
+    ///
+    /// The contract address of the verifier singleton.
+    ///
+    /// # Errors
+    ///
+    /// * [`FactoryError::MissingConfig`] - If factory configuration is not initialized.
     pub fn get_verifier(env: Env, signer_kind: SignerKind) -> Address {
         let config = get_config(&env);
         match signer_kind {
@@ -145,6 +206,19 @@ impl Contract {
         }
     }
 
+    /// Retrieves the configured threshold policy contract address.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - Access to the Soroban environment.
+    ///
+    /// # Returns
+    ///
+    /// The contract address of the threshold policy singleton.
+    ///
+    /// # Errors
+    ///
+    /// * [`FactoryError::MissingConfig`] - If factory configuration is not initialized.
     pub fn get_threshold_policy(env: Env) -> Address {
         get_config(&env).threshold_policy
     }

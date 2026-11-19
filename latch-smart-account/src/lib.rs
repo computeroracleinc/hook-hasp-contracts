@@ -74,6 +74,16 @@ impl LatchSmartAccount {
         );
     }
 
+    /// Adds a batch of signers to an existing context rule on this smart
+    /// account.
+    ///
+    /// Requires authorization from the smart account itself (`e.current_contract_address()`).
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - Access to the Soroban environment.
+    /// * `context_rule_id` - The numeric identifier of the context rule to modify.
+    /// * `signers` - The list of signers to associate with the context rule.
     pub fn batch_add_signer(e: &Env, context_rule_id: u32, signers: Vec<Signer>) {
         e.current_contract_address().require_auth();
         smart_account::batch_add_signer(e, context_rule_id, &signers);
@@ -182,6 +192,24 @@ impl CustomAccountInterface for LatchSmartAccount {
     type Error = SmartAccountError;
     type Signature = AuthPayload;
 
+    /// Verifies authentication and policy compliance for a set of authorization
+    /// contexts.
+    ///
+    /// Invoked by the Soroban host whenever this account is called upon to
+    /// authorize an operation (`require_auth`). Matches signatures against
+    /// registered context rules, validates verifiers, and enforces all
+    /// attached policy constraints.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - Access to the Soroban environment.
+    /// * `signature_payload` - The 32-byte host-generated authorization hash to verify.
+    /// * `signatures` - The authentication signatures/payload provided by callers.
+    /// * `auth_contexts` - The tree of contract calls/host functions requested to authorize.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on successful authorization, or a [`SmartAccountError`] on failure.
     fn __check_auth(
         e: Env,
         signature_payload: Hash<32>,
@@ -200,6 +228,15 @@ impl ExecutionEntryPoint for LatchSmartAccount {}
 
 #[contractimpl]
 impl Upgradeable for LatchSmartAccount {
+    /// Upgrades the contract executable code to a new WASM bytecode hash.
+    ///
+    /// Requires authorization from the smart account itself (`e.current_contract_address()`).
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - Access to the Soroban environment.
+    /// * `new_wasm_hash` - The 32-byte hash of the newly uploaded WASM bytecode.
+    /// * `_operator` - The address initiating the upgrade request (unused; caller auth handled via account).
     fn upgrade(e: &Env, new_wasm_hash: BytesN<32>, _operator: Address) {
         e.current_contract_address().require_auth();
         upgradeable::upgrade(e, &new_wasm_hash);

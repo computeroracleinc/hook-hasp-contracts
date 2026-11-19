@@ -10,5 +10,6 @@ pub struct DummyAccount;
 
 #[contractimpl]
 impl DummyAccount {
+    /// No-op constructor for test dummy account contracts.
     pub fn __constructor(_env: Env, _signers: Vec<Signer>, _policies: Map<Address, Val>) {}
 }

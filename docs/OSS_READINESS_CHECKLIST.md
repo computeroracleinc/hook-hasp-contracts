@@ -74,6 +74,10 @@ got wrong on the first pass here — read the note before you repeat the mistake
       our CI matrix from 2 to 8 jobs over the course of this session and initially left the
       ruleset only requiring the original 2. All 8 `build-and-test` jobs plus `check-for-typos`
       are now required to merge.
+- [x] **Pin all GitHub Actions to exact full-length commit SHAs.** Tag hijacking prevention:
+      all actions across `.github/workflows/*.yml` use immutable 40-character commit SHAs
+      with trailing version comment tags (e.g., `actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0`),
+      enforced continuously by `./scripts/security_malware_check.sh`.
 
 ## 4. Contributor Experience
 
