@@ -48,7 +48,8 @@ multiple-versions = "warn"
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
-# Explicitly ban high-risk C/native-binding crates unnecessary for Soroban WASM contracts.
+# Explicitly ban high-risk C/native-binding crates unnecessary for Soroban WASM contracts,
+# as well as compromised or hostile malicious packages.
 deny = [
     { crate = "openssl-sys", reason = "Unnecessary native C OpenSSL binding in Soroban WASM workspace" },
     { crate = "libssh2-sys", reason = "Unnecessary native SSH library in smart-contract workspace" },
