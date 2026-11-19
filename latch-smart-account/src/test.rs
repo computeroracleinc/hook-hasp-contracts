@@ -733,3 +733,196 @@ fn create_contract_rule_rejects_non_matching_signer() {
         let _ = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
     });
 }
+
+// ============================================================================
+// ADVERSARIAL TEST HARNESS: UNAUTHORIZED CONTRACT UPGRADE PAYLOADS (ISSUE #88)
+// ============================================================================
+//
+// Tests adversarial upgrade scenarios against `upgrade()`:
+// 1. Unauthenticated upgrades (arbitrary caller without account self-auth)
+// 2. Unauthenticated upgrades attempting to bypass via third-party caller authorization
+// 3. Corrupted WASM headers (invalid magic number, malformed version, truncated bytecode)
+// 4. Oversized / invalid bytecode payloads that fail upload / upgrade validation
+// 5. Unregistered / non-existent WASM hash rejection even when self-authorized
+// 6. Adversarial payloads attempting to abuse context rules / unauthorized signers
+
+#[test]
+#[should_panic]
+fn adversarial_upgrade_rejected_without_auth() {
+    let env = Env::default();
+    // Intentionally DO NOT mock all auths
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let malicious_wasm_hash = BytesN::from_array(&env, &[0xde; 32]);
+    let attacker = Address::generate(&env);
+
+    // Call directly as attacker without account's auth
+    client.upgrade(&malicious_wasm_hash, &attacker);
+}
+
+#[test]
+#[should_panic]
+fn adversarial_upgrade_rejected_when_authenticated_by_non_account_actor() {
+    let env = Env::default();
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let malicious_wasm_hash = BytesN::from_array(&env, &[0xad; 32]);
+    let attacker = Address::generate(&env);
+
+    // Mock auth ONLY for attacker, NOT for account_id
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &account_id,
+            fn_name: "upgrade",
+            args: (malicious_wasm_hash.clone(), attacker.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    // Account requires self-auth (`e.current_contract_address().require_auth()`),
+    // so attacker's authorization must be strictly rejected.
+    client.upgrade(&malicious_wasm_hash, &attacker);
+}
+
+#[test]
+#[should_panic]
+fn adversarial_upgrade_rejected_non_existent_wasm_hash() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    // Provide a fabricated hash that was never uploaded to the ledger
+    let fictitious_wasm_hash = BytesN::from_array(&env, &[0xfe; 32]);
+
+    client.upgrade(&fictitious_wasm_hash, &account_id);
+}
+
+#[test]
+#[should_panic]
+fn adversarial_upgrade_rejected_corrupted_wasm_magic_header() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Standard WASM binary begins with magic `\0asm` [0x00, 0x61, 0x73, 0x6d]
+    // Corrupt the header magic bytes
+    let corrupted_magic: [u8; 16] = [
+        0xde, 0xad, 0xbe, 0xef, // Bad magic header (not \0asm)
+        0x01, 0x00, 0x00, 0x00, // WASM version 1
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    // Host deployer rejects uploading invalid WASM bytecode
+    let wasm_hash = env.deployer().upload_contract_wasm(&corrupted_magic);
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    client.upgrade(&wasm_hash, &account_id);
+}
+
+#[test]
+#[should_panic]
+fn adversarial_upgrade_rejected_corrupted_wasm_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Valid magic `\0asm` but corrupted version (0x02_00_00_00 or bad version)
+    let corrupted_version: [u8; 16] = [
+        0x00, 0x61, 0x73, 0x6d, // \0asm
+        0xff, 0xff, 0x00, 0x00, // Invalid version
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    let wasm_hash = env.deployer().upload_contract_wasm(&corrupted_version);
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    client.upgrade(&wasm_hash, &account_id);
+}
+
+#[test]
+#[should_panic]
+fn adversarial_upgrade_rejected_truncated_wasm_header() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Truncated header (less than 8 bytes)
+    let truncated_wasm: [u8; 3] = [0x00, 0x61, 0x73];
+
+    let wasm_hash = env.deployer().upload_contract_wasm(&truncated_wasm);
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    client.upgrade(&wasm_hash, &account_id);
+}
+
+#[test]
+#[should_panic]
+fn adversarial_upgrade_rejected_oversized_bytecode() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Soroban contract WASM has strict size limits.
+    // An adversarial oversized bytecode buffer exceeding allowed limit.
+    let mut oversized = std::vec![0u8; 512 * 1024];
+    oversized[0..4].copy_from_slice(&[0x00, 0x61, 0x73, 0x6d]); // \0asm
+    oversized[4..8].copy_from_slice(&[0x01, 0x00, 0x00, 0x00]); // version 1
+
+    let wasm_hash = env.deployer().upload_contract_wasm(oversized.as_slice());
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    client.upgrade(&wasm_hash, &account_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3002)")] // UnvalidatedContext
+fn adversarial_upgrade_via_check_auth_rejected_for_unauthorized_signer() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let owner_signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, _client) = register_account(&env, &owner_signers, &policies);
+
+    // Target upgrade hash
+    let wasm_hash = BytesN::from_array(&env, &[0x42; 32]);
+    let operator = Address::generate(&env);
+
+    // Attacker generates an unauthorized signer key
+    let attacker_signer = Signer::Delegated(Address::generate(&env));
+    let attacker_signers = vec![&env, attacker_signer];
+
+    // Construct CallContract context targeting account's own upgrade()
+    let context = Context::Contract(ContractContext {
+        contract: account_id.clone(),
+        fn_name: symbol_short!("upgrade"),
+        args: (wasm_hash.clone(), operator.clone()).into_val(&env),
+    });
+    let auth_contexts = Vec::from_array(&env, [context]);
+
+    // Attacker crafts signatures referencing rule 0 (default rule)
+    let signatures = create_signatures(&env, &attacker_signers, vec![&env, 0]);
+    let payload_hash = env.crypto().sha256(&Bytes::from_array(&env, &[0xaa; 32]));
+
+    // Attempting to authenticate the upgrade call via __check_auth with attacker's signer
+    // must strictly fail with UnvalidatedContext (#3002)
+    env.as_contract(&account_id, || {
+        let _ = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
+    });
+}
