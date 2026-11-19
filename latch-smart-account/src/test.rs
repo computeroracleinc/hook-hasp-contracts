@@ -2,7 +2,7 @@
 
 extern crate std;
 
-use session_policy::{SessionAccountParams, SessionPolicy};
+use session_policy::{SessionAccountParams, SessionPolicy, MAX_SESSION_DURATION};
 use soroban_sdk::{
     auth::{
         Context, ContractContext, ContractExecutable, CreateContractWithConstructorHostFnContext,
@@ -389,6 +389,34 @@ fn session_call_after_valid_until_expiry_rejected() {
     env.as_contract(&account_id, || {
         let _ = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
     });
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn session_rule_exceeding_max_duration_rejected_on_policy_install() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let owner_signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &owner_signers, &policies);
+
+    let target_id = env.register(MockTargetContract, ());
+    let session_signer = Signer::Delegated(Address::generate(&env));
+    let expiry_ledger = env.ledger().sequence() + MAX_SESSION_DURATION + 1;
+
+    let rule = client.add_context_rule(
+        &ContextRuleType::CallContract(target_id.clone()),
+        &String::from_str(&env, "session"),
+        &Some(expiry_ledger),
+        &vec![&env, session_signer],
+        &Map::new(&env),
+    );
+
+    let session_policy_id = env.register(SessionPolicy, ());
+    let install_param: Val =
+        SessionAccountParams { allowed_fns: vec![&env, Symbol::new(&env, "set")] }.into_val(&env);
+    client.add_policy(&rule.id, &session_policy_id, &install_param);
 }
 
 #[test]

@@ -3,7 +3,7 @@ extern crate std;
 use soroban_sdk::{
     auth::{Context, ContractContext, ContractExecutable, CreateContractHostFnContext},
     contract, symbol_short,
-    testutils::{Address as _, Events},
+    testutils::{Address as _, Events, Ledger as _},
     vec, Address, BytesN, Env, String, Vec,
 };
 use stellar_accounts::smart_account::{ContextRule, ContextRuleType, Signer};
@@ -324,5 +324,97 @@ fn get_allowed_fns_returns_installed_value() {
     e.as_contract(&address, || {
         let allowed_fns = get_allowed_fns(&e, context_rule.id, &smart_account);
         assert_eq!(allowed_fns, vec![&e, symbol_short!("set"), symbol_short!("get")]);
+    });
+}
+
+#[test]
+fn create_session_accepts_expiry_at_max_duration() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let current_ledger = e.ledger().sequence();
+    let mut context_rule = create_context_rule(&e);
+    context_rule.valid_until = Some(current_ledger + MAX_SESSION_DURATION);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams { allowed_fns: vec![&e, symbol_short!("set")] };
+        create_session(&e, &params, &context_rule, &smart_account);
+
+        assert!(!get_allowed_fns(&e, context_rule.id, &smart_account).is_empty());
+    });
+}
+
+#[test]
+fn create_session_accepts_rule_without_expiry() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams { allowed_fns: vec![&e, symbol_short!("set")] };
+        create_session(&e, &params, &context_rule, &smart_account);
+
+        assert_eq!(context_rule.valid_until, None);
+    });
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn create_session_rejects_expiry_beyond_max_duration() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let current_ledger = e.ledger().sequence();
+    let mut context_rule = create_context_rule(&e);
+    context_rule.valid_until = Some(current_ledger + MAX_SESSION_DURATION + 1);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams { allowed_fns: vec![&e, symbol_short!("set")] };
+        create_session(&e, &params, &context_rule, &smart_account);
+    });
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn install_rejects_expiry_beyond_max_duration() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let current_ledger = e.ledger().sequence();
+    let mut context_rule = create_context_rule(&e);
+    context_rule.valid_until = Some(current_ledger + MAX_SESSION_DURATION * 2);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams { allowed_fns: vec![&e, symbol_short!("set")] };
+        install(&e, &params, &context_rule, &smart_account);
+    });
+}
+
+#[test]
+fn expiry_within_max_duration_is_measured_against_current_ledger() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let mut context_rule = create_context_rule(&e);
+    let expiry = e.ledger().sequence() + MAX_SESSION_DURATION;
+    context_rule.valid_until = Some(expiry);
+
+    e.ledger().with_mut(|li| {
+        li.sequence_number = expiry - MAX_SESSION_DURATION / 2;
+    });
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams { allowed_fns: vec![&e, symbol_short!("set")] };
+        install(&e, &params, &context_rule, &smart_account);
     });
 }

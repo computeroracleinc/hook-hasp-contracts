@@ -2,7 +2,9 @@
 
 mod allowlist;
 
-pub use allowlist::{SessionAccountParams, SessionData, SessionError, SessionStorageKey};
+pub use allowlist::{
+    SessionAccountParams, SessionData, SessionError, SessionStorageKey, MAX_SESSION_DURATION,
+};
 use soroban_sdk::{auth::Context, contract, contractimpl, Address, Env, Symbol, Vec};
 use stellar_accounts::{
     policies::Policy,
@@ -42,6 +44,21 @@ impl Policy for SessionPolicy {
 
 #[contractimpl]
 impl SessionPolicy {
+    /// Creates a session with the given allowlist, rejecting a `valid_until`
+    /// that is more than `MAX_SESSION_DURATION` ledgers in the future.
+    ///
+    /// # Errors
+    ///
+    /// * Refer to [`SessionError`] for the validation failures.
+    pub fn create_session(
+        e: &Env,
+        params: SessionAccountParams,
+        context_rule: ContextRule,
+        smart_account: Address,
+    ) {
+        allowlist::create_session(e, &params, &context_rule, &smart_account)
+    }
+
     pub fn get_allowed_fns(e: &Env, context_rule_id: u32, smart_account: Address) -> Vec<Symbol> {
         allowlist::get_allowed_fns(e, context_rule_id, &smart_account)
     }

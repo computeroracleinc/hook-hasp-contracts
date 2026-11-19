@@ -6,11 +6,12 @@
 //! ephemeral signer with this policy so the session key may only invoke the
 //! allowlisted functions on that one contract.
 //!
-//! Session expiry and revocation are intentionally not reimplemented here —
-//! they are already provided by the smart account's own `ContextRule`
-//! machinery (`valid_until` and `remove_context_rule`). This policy only
-//! adds the one thing the account model doesn't already provide: narrowing
-//! a `CallContract` rule down to specific function names.
+//! Session expiry and revocation are otherwise provided by the smart
+//! account's own `ContextRule` machinery (`valid_until` and
+//! `remove_context_rule`). This policy adds two things the account model
+//! doesn't already provide: narrowing a `CallContract` rule down to specific
+//! function names, and rejecting sessions whose `valid_until` is further than
+//! [`MAX_SESSION_DURATION`] ledgers in the future.
 use soroban_sdk::{
     auth::{Context, ContractContext},
     contracterror, contractevent, contracttype, panic_with_error, Address, Env, Symbol, Vec,
@@ -86,6 +87,9 @@ pub enum SessionError {
     /// The policy was already installed for this smart account and context
     /// rule.
     AlreadyInstalled = 5,
+    /// The context rule's `valid_until` is more than `MAX_SESSION_DURATION`
+    /// ledgers in the future.
+    SessionDurationExceeded = 6,
 }
 
 /// Storage keys for session policy data.
@@ -104,6 +108,12 @@ pub const SESSION_TTL_THRESHOLD: u32 = SESSION_EXTEND_AMOUNT - DAY_IN_LEDGERS;
 /// Maximum number of allowed function names per session policy.
 /// Bounds the linear scan performed in `enforce` and the storage size.
 pub const MAX_ALLOWED_FNS: u32 = 10;
+
+/// Maximum lifetime of a session, expressed as a ledger delta from the
+/// current ledger. A context rule with a `valid_until` further ahead than
+/// this is rejected when the session is created. Rules without an expiry are
+/// left to the smart account's own rule management.
+pub const MAX_SESSION_DURATION: u32 = 30 * DAY_IN_LEDGERS;
 
 // ################## QUERY STATE ##################
 
@@ -189,10 +199,11 @@ pub fn enforce(
     }
 }
 
-/// Installs the session policy on a smart account. Only `CallContract`
-/// context type is allowed, since the allowlisted function names are only
-/// meaningful when pinned to one target contract. Requires authorization
-/// from the smart account.
+/// Creates a session by storing the policy's allowlist for a smart account's
+/// context rule. Only `CallContract` context rules are allowed, the allowlist
+/// must be non-empty and bounded, and a configured `valid_until` may not be
+/// more than [`MAX_SESSION_DURATION`] ledgers ahead of the current ledger.
+/// Requires authorization from the smart account.
 ///
 /// # Arguments
 ///
@@ -209,12 +220,14 @@ pub fn enforce(
 ///   exceeds `MAX_ALLOWED_FNS`.
 /// * [`SessionError::AlreadyInstalled`] - When the policy was already installed
 ///   for this smart account and context rule.
+/// * [`SessionError::SessionDurationExceeded`] - When `valid_until` is further
+///   than `MAX_SESSION_DURATION` ledgers in the future.
 ///
 /// # Events
 ///
 /// * topics - `["session_installed", smart_account: Address]`
 /// * data - `[context_rule_id: u32, allowed_fns: Vec<Symbol>]`
-pub fn install(
+pub fn create_session(
     e: &Env,
     params: &SessionAccountParams,
     context_rule: &ContextRule,
@@ -230,6 +243,8 @@ pub fn install(
     if params.allowed_fns.is_empty() || params.allowed_fns.len() > MAX_ALLOWED_FNS {
         panic_with_error!(e, SessionError::InvalidAllowedFns)
     }
+
+    validate_session_duration(e, context_rule);
 
     let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
 
@@ -247,6 +262,33 @@ pub fn install(
         allowed_fns: params.allowed_fns.clone(),
     }
     .publish(e);
+}
+
+/// Installs the session policy on a smart account. This is the path used by
+/// the smart account when it creates a session context rule, and delegates to
+/// [`create_session`] so the session duration limit is enforced.
+///
+/// # Errors
+///
+/// * Refer to [`create_session`] errors.
+pub fn install(
+    e: &Env,
+    params: &SessionAccountParams,
+    context_rule: &ContextRule,
+    smart_account: &Address,
+) {
+    create_session(e, params, context_rule, smart_account)
+}
+
+/// Rejects context rules whose expiry is beyond the maximum session duration,
+/// measured against the host's current ledger sequence.
+fn validate_session_duration(e: &Env, context_rule: &ContextRule) {
+    if let Some(valid_until) = context_rule.valid_until {
+        let max_valid_until = e.ledger().sequence().saturating_add(MAX_SESSION_DURATION);
+        if valid_until > max_valid_until {
+            panic_with_error!(e, SessionError::SessionDurationExceeded)
+        }
+    }
 }
 
 /// Uninstalls the session policy from a smart account, removing all stored
