@@ -21,7 +21,8 @@ artifacts for 12 of 16 crates; the 4 that differ (`timelock-vault` and
 `multi-token-spending-limit-policy` from the fixes, `latch-smart-account` and
 `factory-contract` from non-behavioural doc-comment/spec changes) need a fresh testnet
 deploy before submission — tracked in [`BUILD.md`](BUILD.md). Threat model in
-[THREAT_MODEL.md](THREAT_MODEL.md); executed test evidence in [TEST_EVIDENCE.md](TEST_EVIDENCE.md).
+[THREAT_MODEL.md](THREAT_MODEL.md); executed test evidence in [TEST_EVIDENCE.md](TEST_EVIDENCE.md);
+formal threshold-policy security proof in [THRESHOLD_POLICY_SECURITY_PROOF.md](THRESHOLD_POLICY_SECURITY_PROOF.md).
 
 ## In scope
 
