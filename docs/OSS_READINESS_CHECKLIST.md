@@ -74,6 +74,10 @@ got wrong on the first pass here — read the note before you repeat the mistake
       our CI matrix from 2 to 8 jobs over the course of this session and initially left the
       ruleset only requiring the original 2. All 8 `build-and-test` jobs plus `check-for-typos`
       are now required to merge.
+- [x] **Gate PRs introducing vulnerable dependencies with Dependency Review.**
+      Integrated `actions/dependency-review-action` (`fail-on-severity: moderate`) into
+      `.github/workflows/security-malware.yml` to block pull requests introducing crates
+      with security advisories or non-compliant licenses.
 
 ## 4. Contributor Experience
 

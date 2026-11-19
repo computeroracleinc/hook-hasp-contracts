@@ -31,6 +31,10 @@ Tracking known gaps and follow-ups.
 
 ## CI
 
+- [x] **Gate pull requests against vulnerable dependencies with GitHub Dependency Review.**
+      PRs introducing dependencies with moderate or higher security advisories or non-compliant
+      licenses are blocked in CI via `actions/dependency-review-action` (`fail-on-severity: moderate`)
+      in `.github/workflows/security-malware.yml`.
 - [x] **CI never verifies the WASM build actually succeeds.** Closed
       2026-09-02: `rust.yml` now has a `wasm-build` job that runs
       `stellar contract build` over the whole workspace (prebuilt stellar-cli
