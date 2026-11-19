@@ -1,0 +1,26 @@
+# cargo-mutants configuration for hook-hasp-contracts
+# See https://mutants.rs/
+
+# Target policies crates
+examine_globs = [
+    "policies/**/src/**/*.rs",
+]
+
+# Exclude test files and test helpers from mutation
+exclude_globs = [
+    "**/test.rs",
+    "**/test/**/*.rs",
+    "**/tests/**/*.rs",
+]
+
+# Baseline cargo test command across the targeted workspace members
+test_tool = "cargo"
+
+# Additional arguments passed to test command
+additional_cargo_test_args = [
+    "--workspace",
+    "--locked",
+]
+
+# Run tests with fail-fast to speed up mutant evaluation
+test_timeout = 60

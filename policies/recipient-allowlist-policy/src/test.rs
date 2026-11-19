@@ -188,3 +188,167 @@ fn test_uninstall_clears_state() {
     let res = client.try_get_allowed_recipients(&rule.id, &smart_account);
     assert!(res.is_err());
 }
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")] // SmartAccountNotInstalled
+fn test_uninstall_rejects_not_installed() {
+    let (e, smart_account, client) = setup_env();
+    let rule = create_context_rule(&e);
+
+    client.uninstall(&rule, &smart_account);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")] // AlreadyInstalled
+fn test_install_rejects_already_installed() {
+    let (e, smart_account, client) = setup_env();
+    let rule = create_context_rule(&e);
+
+    let allowed_recipients = vec![&e, Address::generate(&e)];
+    client.install(
+        &RecipientAccountParams { allowed_recipients: allowed_recipients.clone() },
+        &rule,
+        &smart_account,
+    );
+    client.install(&RecipientAccountParams { allowed_recipients }, &rule, &smart_account);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")] // RecipientNotAllowed
+fn test_enforce_rejects_empty_authenticated_signers() {
+    let (e, smart_account, client) = setup_env();
+
+    let contract_target = Address::generate(&e);
+    let mut rule = create_context_rule(&e);
+    rule.context_type = ContextRuleType::CallContract(contract_target.clone());
+
+    let recipient = Address::generate(&e);
+    let allowed_recipients = vec![&e, recipient.clone()];
+    client.install(&RecipientAccountParams { allowed_recipients }, &rule, &smart_account);
+
+    let args: Vec<Val> =
+        vec![&e, smart_account.into_val(&e), recipient.into_val(&e), 100i128.into_val(&e)];
+    let context = Context::Contract(ContractContext {
+        contract: contract_target,
+        fn_name: Symbol::new(&e, "transfer"),
+        args,
+    });
+
+    client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")] // InvalidTransferArgs
+fn test_enforce_rejects_missing_transfer_args() {
+    let (e, smart_account, client) = setup_env();
+
+    let contract_target = Address::generate(&e);
+    let mut rule = create_context_rule(&e);
+    rule.context_type = ContextRuleType::CallContract(contract_target.clone());
+
+    let recipient = Address::generate(&e);
+    let allowed_recipients = vec![&e, recipient];
+    client.install(&RecipientAccountParams { allowed_recipients }, &rule, &smart_account);
+
+    // Only 1 arg (missing recipient at index 1)
+    let args: Vec<Val> = vec![&e, smart_account.into_val(&e)];
+    let context = Context::Contract(ContractContext {
+        contract: contract_target,
+        fn_name: Symbol::new(&e, "transfer"),
+        args,
+    });
+
+    client.enforce(&context, &rule.signers, &rule, &smart_account);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")] // InvalidTransferArgs
+fn test_enforce_rejects_invalid_recipient_arg_type() {
+    let (e, smart_account, client) = setup_env();
+
+    let contract_target = Address::generate(&e);
+    let mut rule = create_context_rule(&e);
+    rule.context_type = ContextRuleType::CallContract(contract_target.clone());
+
+    let recipient = Address::generate(&e);
+    let allowed_recipients = vec![&e, recipient];
+    client.install(&RecipientAccountParams { allowed_recipients }, &rule, &smart_account);
+
+    // 2nd arg is an integer instead of Address
+    let args: Vec<Val> =
+        vec![&e, smart_account.into_val(&e), 12345i128.into_val(&e), 100i128.into_val(&e)];
+    let context = Context::Contract(ContractContext {
+        contract: contract_target,
+        fn_name: Symbol::new(&e, "transfer"),
+        args,
+    });
+
+    client.enforce(&context, &rule.signers, &rule, &smart_account);
+}
+
+#[test]
+fn test_set_allowed_recipients_success() {
+    let (e, smart_account, client) = setup_env();
+    let rule = create_context_rule(&e);
+
+    let recipient1 = Address::generate(&e);
+    let allowed_recipients1 = vec![&e, recipient1];
+    client.install(
+        &RecipientAccountParams { allowed_recipients: allowed_recipients1 },
+        &rule,
+        &smart_account,
+    );
+
+    let recipient2 = Address::generate(&e);
+    let allowed_recipients2 = vec![&e, recipient2.clone()];
+    client.set_allowed_recipients(&allowed_recipients2, &rule.id, &smart_account);
+
+    assert_eq!(client.get_allowed_recipients(&rule.id, &smart_account), allowed_recipients2);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidAllowedRecipients
+fn test_set_allowed_recipients_rejects_empty() {
+    let (e, smart_account, client) = setup_env();
+    let rule = create_context_rule(&e);
+
+    let recipient1 = Address::generate(&e);
+    client.install(
+        &RecipientAccountParams { allowed_recipients: vec![&e, recipient1] },
+        &rule,
+        &smart_account,
+    );
+
+    client.set_allowed_recipients(&Vec::new(&e), &rule.id, &smart_account);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidAllowedRecipients
+fn test_set_allowed_recipients_rejects_too_large() {
+    let (e, smart_account, client) = setup_env();
+    let rule = create_context_rule(&e);
+
+    let recipient1 = Address::generate(&e);
+    client.install(
+        &RecipientAccountParams { allowed_recipients: vec![&e, recipient1] },
+        &rule,
+        &smart_account,
+    );
+
+    let mut too_many = Vec::new(&e);
+    for _ in 0..(MAX_ALLOWED_RECIPIENTS + 1) {
+        too_many.push_back(Address::generate(&e));
+    }
+    client.set_allowed_recipients(&too_many, &rule.id, &smart_account);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")] // SmartAccountNotInstalled
+fn test_set_allowed_recipients_rejects_not_installed() {
+    let (e, smart_account, client) = setup_env();
+    let rule = create_context_rule(&e);
+
+    let recipient = Address::generate(&e);
+    client.set_allowed_recipients(&vec![&e, recipient], &rule.id, &smart_account);
+}
+

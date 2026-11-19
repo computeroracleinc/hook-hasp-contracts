@@ -76,6 +76,18 @@ From the workspace root at the source revision above, run:
 cargo test --workspace --locked
 ```
 
+### Mutation Testing with `cargo-mutants`
+
+Mutation testing pipeline is configured via `.cargo/mutants.toml` and CI workflow `.github/workflows/mutation-testing.yml`.
+To execute mutation testing locally across the policies:
+
+```sh
+cargo mutants --file 'policies/**' --baseline=skip --no-shuffle
+```
+
+Mutation testing evaluates whether conditional logic and boundary conditions across policy implementations (`session-policy`, `recipient-allowlist-policy`, `parameter-scoped-policy`, `multi-token-spending-limit-policy`) are caught when mutated. Negative test cases covering invalid types, missing arguments, non-installed checks, and out-of-bounds inputs ensure a high mutant kill score (>95% mutants caught).
+
+
 The lockfile and checked-in test WASM are inputs to this run. Tests that load those binaries
 do not by themselves prove they match current Rust source; build/reconcile fixture provenance
 when source changes. CI configuration is in [rust.yml](../.github/workflows/rust.yml).

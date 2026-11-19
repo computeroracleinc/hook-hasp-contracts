@@ -614,3 +614,604 @@ fn constructor_grants_admin_manager_and_executor_roles() {
     assert!(s.fee_forwarder.has_role(&s.relayer, &Symbol::new(&e, "executor")).is_some());
     assert_eq!(s.fee_forwarder.get_admin(), Some(s.admin.clone()));
 }
+
+// ── adversarial test suite: compromised relayer simulation ───────────────────
+//
+// Simulates malicious modifications to parameters in `forward` (sponsored execution)
+// by an adversarial / compromised relayer attempting to:
+//   - Steal user funds (excessive fee, negative/zero fee, redirecting fees, changing fee token)
+//   - Modify calldata (target contract, target function, target arguments)
+//   - Bypass authorization (substituting user, executing expired authorization,
+//     unauthorized caller posing as relayer, replay/mismatched auth tree)
+//
+// Acceptance Criteria: All compromised requests strictly rejected.
+
+#[test]
+#[should_panic]
+fn adversarial_relayer_tamper_target_contract() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // User signs authorization for legitimate target contract
+    let (user_invoke, _) = forward_invokes(&s, &e, s.fee_amount, &fn_name, &fn_args);
+
+    // Adversarial relayer attempts to redirect invocation to a malicious target
+    let malicious_target = Address::generate(&e);
+    let relayer_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward",
+        args: (
+            s.token.address.clone(),
+            s.fee_amount,
+            s.max_fee_amount,
+            current_ledger,
+            malicious_target.clone(),
+            fn_name.clone(),
+            fn_args.clone(),
+            s.user.clone(),
+            s.relayer.clone(),
+        )
+            .into_val(&e),
+        sub_invokes: &[],
+    };
+
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke },
+    ];
+
+    s.fee_forwarder
+        .mock_auths(&auths)
+        .forward(
+            &s.token.address,
+            &s.fee_amount,
+            &s.max_fee_amount,
+            &current_ledger,
+            &malicious_target,
+            &fn_name,
+            &fn_args,
+            &s.user,
+            &s.relayer,
+        );
+}
+
+#[test]
+#[should_panic]
+fn adversarial_relayer_tamper_target_function() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let legitimate_fn = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // User signs for legitimate function "greet"
+    let (user_invoke, _) = forward_invokes(&s, &e, s.fee_amount, &legitimate_fn, &fn_args);
+
+    // Adversarial relayer modifies target function to "drain" or unexpected function
+    let malicious_fn = Symbol::new(&e, "drain");
+    let relayer_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward",
+        args: (
+            s.token.address.clone(),
+            s.fee_amount,
+            s.max_fee_amount,
+            current_ledger,
+            s.target.address.clone(),
+            malicious_fn.clone(),
+            fn_args.clone(),
+            s.user.clone(),
+            s.relayer.clone(),
+        )
+            .into_val(&e),
+        sub_invokes: &[],
+    };
+
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke },
+    ];
+
+    s.fee_forwarder
+        .mock_auths(&auths)
+        .forward(
+            &s.token.address,
+            &s.fee_amount,
+            &s.max_fee_amount,
+            &current_ledger,
+            &s.target.address,
+            &malicious_fn,
+            &fn_args,
+            &s.user,
+            &s.relayer,
+        );
+}
+
+#[test]
+#[should_panic]
+fn adversarial_relayer_tamper_target_arguments() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "act_as");
+    let legitimate_args: Vec<Val> = vec![&e, s.user.clone().into_val(&e)];
+    let current_ledger = e.ledger().sequence();
+
+    // User signs invocation with legitimate arguments
+    let target_invoke = MockAuthInvoke {
+        contract: &s.target.address,
+        fn_name: "act_as",
+        args: (s.user.clone(),).into_val(&e),
+        sub_invokes: &[],
+    };
+    let user_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward",
+        args: (
+            s.token.address.clone(),
+            s.max_fee_amount,
+            current_ledger,
+            s.target.address.clone(),
+            fn_name.clone(),
+            legitimate_args.clone(),
+        )
+            .into_val(&e),
+        sub_invokes: &[target_invoke],
+    };
+
+    // Adversarial relayer modifies arguments (e.g. replacing caller with attacker)
+    let attacker = Address::generate(&e);
+    let tampered_args: Vec<Val> = vec![&e, attacker.clone().into_val(&e)];
+    let relayer_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward",
+        args: (
+            s.token.address.clone(),
+            s.fee_amount,
+            s.max_fee_amount,
+            current_ledger,
+            s.target.address.clone(),
+            fn_name.clone(),
+            tampered_args.clone(),
+            s.user.clone(),
+            s.relayer.clone(),
+        )
+            .into_val(&e),
+        sub_invokes: &[],
+    };
+
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke },
+    ];
+
+    s.fee_forwarder
+        .mock_auths(&auths)
+        .forward(
+            &s.token.address,
+            &s.fee_amount,
+            &s.max_fee_amount,
+            &current_ledger,
+            &s.target.address,
+            &fn_name,
+            &tampered_args,
+            &s.user,
+            &s.relayer,
+        );
+}
+
+#[test]
+#[should_panic]
+fn adversarial_relayer_tamper_fee_token() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // User signed auth for s.token
+    let (user_invoke, _) = forward_invokes(&s, &e, s.fee_amount, &fn_name, &fn_args);
+
+    // Relayer attempts to substitute a different, more expensive token or victim token
+    let malicious_token = Address::generate(&e);
+    let relayer_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward",
+        args: (
+            malicious_token.clone(),
+            s.fee_amount,
+            s.max_fee_amount,
+            current_ledger,
+            s.target.address.clone(),
+            fn_name.clone(),
+            fn_args.clone(),
+            s.user.clone(),
+            s.relayer.clone(),
+        )
+            .into_val(&e),
+        sub_invokes: &[],
+    };
+
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke },
+    ];
+
+    s.fee_forwarder
+        .mock_auths(&auths)
+        .forward(
+            &malicious_token,
+            &s.fee_amount,
+            &s.max_fee_amount,
+            &current_ledger,
+            &s.target.address,
+            &fn_name,
+            &fn_args,
+            &s.user,
+            &s.relayer,
+        );
+}
+
+#[test]
+#[should_panic]
+fn adversarial_relayer_tamper_user_address() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    let (user_invoke, _) = forward_invokes(&s, &e, s.fee_amount, &fn_name, &fn_args);
+
+    // Relayer attempts to charge another innocent user who did not authorize this call
+    let victim_user = Address::generate(&e);
+    let relayer_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward",
+        args: (
+            s.token.address.clone(),
+            s.fee_amount,
+            s.max_fee_amount,
+            current_ledger,
+            s.target.address.clone(),
+            fn_name.clone(),
+            fn_args.clone(),
+            victim_user.clone(),
+            s.relayer.clone(),
+        )
+            .into_val(&e),
+        sub_invokes: &[],
+    };
+
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke },
+    ];
+
+    s.fee_forwarder
+        .mock_auths(&auths)
+        .forward(
+            &s.token.address,
+            &s.fee_amount,
+            &s.max_fee_amount,
+            &current_ledger,
+            &s.target.address,
+            &fn_name,
+            &fn_args,
+            &victim_user,
+            &s.relayer,
+        );
+}
+
+#[test]
+#[should_panic]
+fn adversarial_relayer_tamper_max_fee_amount() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // User signed auth with max_fee_amount = 150_000
+    let (user_invoke, _) = forward_invokes(&s, &e, s.fee_amount, &fn_name, &fn_args);
+
+    // Relayer attempts to pass a forged higher max_fee_amount to collect exorbitant fee
+    let inflated_max_fee = s.max_fee_amount * 10;
+    let inflated_fee = inflated_max_fee;
+    let relayer_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward",
+        args: (
+            s.token.address.clone(),
+            inflated_fee,
+            inflated_max_fee,
+            current_ledger,
+            s.target.address.clone(),
+            fn_name.clone(),
+            fn_args.clone(),
+            s.user.clone(),
+            s.relayer.clone(),
+        )
+            .into_val(&e),
+        sub_invokes: &[],
+    };
+
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke },
+    ];
+
+    s.fee_forwarder
+        .mock_auths(&auths)
+        .forward(
+            &s.token.address,
+            &inflated_fee,
+            &inflated_max_fee,
+            &current_ledger,
+            &s.target.address,
+            &fn_name,
+            &fn_args,
+            &s.user,
+            &s.relayer,
+        );
+}
+
+#[test]
+#[should_panic]
+fn adversarial_relayer_tamper_expiration_ledger() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let signed_ledger = e.ledger().sequence();
+
+    // User signed auth with signed_ledger
+    let (user_invoke, _) = forward_invokes(&s, &e, s.fee_amount, &fn_name, &fn_args);
+
+    // Relayer modifies expiration_ledger parameter
+    let modified_ledger = signed_ledger + 500;
+    let relayer_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward",
+        args: (
+            s.token.address.clone(),
+            s.fee_amount,
+            s.max_fee_amount,
+            modified_ledger,
+            s.target.address.clone(),
+            fn_name.clone(),
+            fn_args.clone(),
+            s.user.clone(),
+            s.relayer.clone(),
+        )
+            .into_val(&e),
+        sub_invokes: &[],
+    };
+
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke },
+    ];
+
+    s.fee_forwarder
+        .mock_auths(&auths)
+        .forward(
+            &s.token.address,
+            &s.fee_amount,
+            &s.max_fee_amount,
+            &modified_ledger,
+            &s.target.address,
+            &fn_name,
+            &fn_args,
+            &s.user,
+            &s.relayer,
+        );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5003)")]
+fn adversarial_relayer_excessive_fee_beyond_max() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // Compromised relayer attempts to extract fee > max_fee_amount
+    let stolen_fee = s.max_fee_amount + 10_000;
+    let (user_invoke, _) = forward_invokes(&s, &e, s.fee_amount, &fn_name, &fn_args);
+    let relayer_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward",
+        args: (
+            s.token.address.clone(),
+            stolen_fee,
+            s.max_fee_amount,
+            current_ledger,
+            s.target.address.clone(),
+            fn_name.clone(),
+            fn_args.clone(),
+            s.user.clone(),
+            s.relayer.clone(),
+        )
+            .into_val(&e),
+        sub_invokes: &[],
+    };
+
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke },
+    ];
+
+    s.fee_forwarder
+        .mock_auths(&auths)
+        .forward(
+            &s.token.address,
+            &stolen_fee,
+            &s.max_fee_amount,
+            &current_ledger,
+            &s.target.address,
+            &fn_name,
+            &fn_args,
+            &s.user,
+            &s.relayer,
+        );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5003)")]
+fn adversarial_relayer_zero_or_negative_fee() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    let invalid_fee = 0i128;
+    let (user_invoke, _) = forward_invokes(&s, &e, s.fee_amount, &fn_name, &fn_args);
+    let relayer_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward",
+        args: (
+            s.token.address.clone(),
+            invalid_fee,
+            s.max_fee_amount,
+            current_ledger,
+            s.target.address.clone(),
+            fn_name.clone(),
+            fn_args.clone(),
+            s.user.clone(),
+            s.relayer.clone(),
+        )
+            .into_val(&e),
+        sub_invokes: &[],
+    };
+
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke },
+    ];
+
+    s.fee_forwarder
+        .mock_auths(&auths)
+        .forward(
+            &s.token.address,
+            &invalid_fee,
+            &s.max_fee_amount,
+            &current_ledger,
+            &s.target.address,
+            &fn_name,
+            &fn_args,
+            &s.user,
+            &s.relayer,
+        );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2000)")]
+fn adversarial_compromised_caller_not_holding_executor_role() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // Attacker without executor role tries to execute sponsored request
+    let attacker = Address::generate(&e);
+    let (user_invoke, _) = forward_invokes(&s, &e, s.fee_amount, &fn_name, &fn_args);
+    let attacker_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward",
+        args: (
+            s.token.address.clone(),
+            s.fee_amount,
+            s.max_fee_amount,
+            current_ledger,
+            s.target.address.clone(),
+            fn_name.clone(),
+            fn_args.clone(),
+            s.user.clone(),
+            attacker.clone(),
+        )
+            .into_val(&e),
+        sub_invokes: &[],
+    };
+
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &attacker, invoke: &attacker_invoke },
+    ];
+
+    s.fee_forwarder
+        .mock_auths(&auths)
+        .forward(
+            &s.token.address,
+            &s.fee_amount,
+            &s.max_fee_amount,
+            &current_ledger,
+            &s.target.address,
+            &fn_name,
+            &fn_args,
+            &s.user,
+            &attacker,
+        );
+}
+
+#[test]
+#[should_panic]
+fn adversarial_relayer_expired_ledger() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let past_ledger = 100u32;
+
+    // Fast-forward current ledger past the authorization expiration ledger
+    e.ledger().set_sequence_number(200u32);
+
+    let (user_invoke, relayer_invoke) = forward_invokes(&s, &e, s.fee_amount, &fn_name, &fn_args);
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke },
+    ];
+
+    // Relayer attempts to submit an expired request
+    s.fee_forwarder
+        .mock_auths(&auths)
+        .forward(
+            &s.token.address,
+            &s.fee_amount,
+            &s.max_fee_amount,
+            &past_ledger,
+            &s.target.address,
+            &fn_name,
+            &fn_args,
+            &s.user,
+            &s.relayer,
+        );
+}
+

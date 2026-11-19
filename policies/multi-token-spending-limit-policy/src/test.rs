@@ -766,3 +766,27 @@ fn test_get_policy_data_rejects_not_installed() {
     let (_e, smart_account, client) = setup_env();
     client.get_policy_data(&1, &smart_account);
 }
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")] // InvalidTransferArgs
+fn test_enforce_rejects_invalid_amount_arg_type() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 0);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    let from = Address::generate(&e);
+    let to = Address::generate(&e);
+    let args: Vec<Val> =
+        vec![&e, from.into_val(&e), to.into_val(&e), Symbol::new(&e, "invalid").into_val(&e)];
+    let context = Context::Contract(ContractContext {
+        contract: token,
+        fn_name: Symbol::new(&e, "transfer"),
+        args,
+    });
+
+    client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
+}
+

@@ -1,0 +1,55 @@
+name: Mutation Testing
+
+on:
+  pull_request:
+    paths:
+      - 'policies/**'
+      - '.cargo/mutants.toml'
+      - '.github/workflows/mutation-testing.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-mutants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: stable
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@b706c6e76cf0e4708703a55b38f8f2b260f84478 # v2.49.18
+        with:
+          tool: cargo-mutants
+
+      - name: Run cargo-mutants on policies
+        run: |
+          cargo mutants --file 'policies/**' --baseline=skip --no-shuffle --colors=never --output mutants.out
+          echo "### Mutation Testing Summary" >> $GITHUB_STEP_SUMMARY
+          if [ -f mutants.out/mutants.json ]; then
+            python3 -c "
+          import json
+          with open('mutants.out/mutants.json') as f:
+              data = json.load(f)
+          total = len(data)
+          caught = sum(1 for m in data if m.get('scenario') == 'Caught' or m.get('summary') == 'caught')
+          missed = sum(1 for m in data if m.get('scenario') == 'Missed' or m.get('summary') == 'missed')
+          print(f'Total mutants: {total}, Caught: {caught}, Missed: {missed}')
+          " >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Archive mutation test results
+        if: always()
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: mutants-report
+          path: mutants.out/
