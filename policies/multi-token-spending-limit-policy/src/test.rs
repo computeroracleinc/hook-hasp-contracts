@@ -193,7 +193,7 @@ fn test_install_caches_non_standard_oracle_decimals() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #1)")] // InvalidContextRule
+#[should_panic(expected = "Error(Contract, #300)")] // InvalidContextRule
 fn test_install_rejects_non_call_contract() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -215,7 +215,7 @@ fn test_install_rejects_non_call_contract() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #2)")] // InvalidInstallParams
+#[should_panic(expected = "Error(Contract, #301)")] // InvalidInstallParams
 fn test_install_rejects_non_positive_limit() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -225,7 +225,7 @@ fn test_install_rejects_non_positive_limit() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #2)")] // InvalidInstallParams
+#[should_panic(expected = "Error(Contract, #301)")] // InvalidInstallParams
 fn test_install_rejects_zero_period() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -235,7 +235,7 @@ fn test_install_rejects_zero_period() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #2)")] // InvalidInstallParams
+#[should_panic(expected = "Error(Contract, #301)")] // InvalidInstallParams
 fn test_install_rejects_empty_allowed_tokens() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -254,7 +254,7 @@ fn test_install_rejects_empty_allowed_tokens() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")] // AlreadyInstalled
+#[should_panic(expected = "Error(Contract, #302)")] // AlreadyInstalled
 fn test_install_rejects_double_install() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -275,7 +275,7 @@ fn test_install_rejects_double_install() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #10)")] // InvalidOracleResponse
+#[should_panic(expected = "Error(Contract, #309)")] // InvalidOracleResponse
 fn test_install_rejects_oracle_decimals_too_large() {
     let (e, smart_account, client) = setup_env();
     // 31 decimals overflows the `10i128.checked_pow` bound this policy
@@ -302,7 +302,7 @@ fn test_uninstall_clears_state() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")] // NotInstalled
+#[should_panic(expected = "Error(Contract, #303)")] // NotInstalled
 fn test_uninstall_rejects_not_installed() {
     let (e, smart_account, client) = setup_env();
     let rule = create_context_rule(&e, Address::generate(&e));
@@ -350,7 +350,7 @@ fn test_enforce_converts_using_non_standard_oracle_decimals() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #5)")] // TokenNotAllowed
+#[should_panic(expected = "Error(Contract, #304)")] // TokenNotAllowed
 fn test_enforce_rejects_token_not_allowed() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -365,7 +365,7 @@ fn test_enforce_rejects_token_not_allowed() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")] // InvalidTransferArgs
+#[should_panic(expected = "Error(Contract, #305)")] // InvalidTransferArgs
 fn test_enforce_rejects_non_transfer_call() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -387,7 +387,7 @@ fn test_enforce_rejects_non_transfer_call() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")] // InvalidTransferArgs
+#[should_panic(expected = "Error(Contract, #305)")] // InvalidTransferArgs
 fn test_enforce_rejects_missing_amount_arg() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -410,7 +410,7 @@ fn test_enforce_rejects_missing_amount_arg() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")] // InvalidTransferArgs
+#[should_panic(expected = "Error(Contract, #305)")] // InvalidTransferArgs
 fn test_enforce_rejects_negative_amount() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -424,7 +424,7 @@ fn test_enforce_rejects_negative_amount() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #10)")] // InvalidOracleResponse
+#[should_panic(expected = "Error(Contract, #309)")] // InvalidOracleResponse
 fn test_enforce_rejects_when_oracle_has_no_price() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -444,7 +444,7 @@ fn test_enforce_rejects_when_oracle_has_no_price() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #7)")] // StaleOraclePrice
+#[should_panic(expected = "Error(Contract, #306)")] // StaleOraclePrice
 fn test_enforce_rejects_stale_price() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -463,7 +463,7 @@ fn test_enforce_rejects_stale_price() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #10)")] // InvalidOracleResponse
+#[should_panic(expected = "Error(Contract, #309)")] // InvalidOracleResponse
 fn test_enforce_rejects_negative_oracle_price() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -484,7 +484,7 @@ fn test_enforce_rejects_negative_oracle_price() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #10)")] // InvalidOracleResponse
+#[should_panic(expected = "Error(Contract, #309)")] // InvalidOracleResponse
 fn test_enforce_rejects_zero_oracle_price() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -502,7 +502,7 @@ fn test_enforce_rejects_zero_oracle_price() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #10)")] // InvalidOracleResponse
+#[should_panic(expected = "Error(Contract, #309)")] // InvalidOracleResponse
 fn test_enforce_rejects_future_dated_oracle_price() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -522,7 +522,7 @@ fn test_enforce_rejects_future_dated_oracle_price() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #8)")] // SpendingLimitExceeded
+#[should_panic(expected = "Error(Contract, #307)")] // SpendingLimitExceeded
 fn test_enforce_rejects_over_limit() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -562,7 +562,7 @@ fn test_enforce_tracks_spend_across_multiple_tokens() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #8)")] // SpendingLimitExceeded
+#[should_panic(expected = "Error(Contract, #307)")] // SpendingLimitExceeded
 fn test_enforce_rejects_combined_spend_over_limit_across_tokens() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -646,7 +646,7 @@ fn test_install_queries_each_token_decimals() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #11)")] // InvalidTokenResponse
+#[should_panic(expected = "Error(Contract, #310)")] // InvalidTokenResponse
 fn test_install_rejects_token_decimals_too_large() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -676,7 +676,7 @@ fn test_enforce_normalizes_token_decimals() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #8)")] // SpendingLimitExceeded
+#[should_panic(expected = "Error(Contract, #307)")] // SpendingLimitExceeded
 fn test_enforce_cap_bites_at_realistic_scale() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -744,7 +744,7 @@ fn test_enforce_sub_dollar_transfer_truncates_to_zero() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #12)")] // AmountConversionOverflow
+#[should_panic(expected = "Error(Contract, #311)")] // AmountConversionOverflow
 fn test_enforce_rejects_conversion_overflow() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -761,8 +761,58 @@ fn test_enforce_rejects_conversion_overflow() {
 // ################## QUERY ##################
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")] // NotInstalled
+#[should_panic(expected = "Error(Contract, #303)")] // NotInstalled
 fn test_get_policy_data_rejects_not_installed() {
     let (_e, smart_account, client) = setup_env();
     client.get_policy_data(&1, &smart_account);
+}
+
+// ################## GAS & RESOURCE CALIBRATION ##################
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 0);
+
+    let rule = install_policy(
+        &e,
+        &client,
+        &smart_account,
+        &oracle,
+        vec![&e, token.clone()],
+        1_000,
+        100,
+    );
+
+    // Soroban Protocol 22 / Host v22 transaction resource limits:
+    // Standard per-transaction maximum: 100M - 400M CPU instructions, 40MB memory.
+    // Reset budget tracking before the benchmarked invocation.
+    e.cost_estimate().budget().reset_default();
+
+    let context = transfer_context(&e, &token, 100);
+    client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
+
+    let cpu_cost = e.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = e.cost_estimate().budget().memory_bytes_cost();
+
+    // Standard Soroban transaction execution limits
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    // Verify resource consumption is well within standard Host v22 transaction limits
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
 }

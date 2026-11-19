@@ -52,21 +52,23 @@ pub struct AccountInitParams {
     pub account_salt: BytesN<32>,
 }
 
+/// Error codes for the factory contract.
+/// Standardized in the 400-499 range allocated for the factory crate.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum FactoryError {
-    AlreadyInitialized = 1,
-    MissingConfig = 2,
-    NoSigners = 3,
-    DuplicateSigner = 4,
-    MissingThreshold = 5,
-    InvalidThreshold = 6,
-    InvalidEd25519Key = 7,
-    InvalidWebAuthnKey = 9,
-    InvalidEd25519Verifier = 10,
-    InvalidWebAuthnVerifier = 12,
-    InvalidThresholdPolicy = 13,
+    AlreadyInitialized = 400,
+    MissingConfig = 401,
+    NoSigners = 402,
+    DuplicateSigner = 403,
+    MissingThreshold = 404,
+    InvalidThreshold = 405,
+    InvalidEd25519Key = 406,
+    InvalidWebAuthnKey = 407,
+    InvalidEd25519Verifier = 408,
+    InvalidWebAuthnVerifier = 409,
+    InvalidThresholdPolicy = 410,
 }
 
 #[contractevent]

@@ -69,48 +69,45 @@ mod oracle;
 use oracle::{fetch_price, fetch_token_divisor, fetch_usd_divisor};
 
 /// Error codes for the multi-token spending limit policy.
-///
-/// This is a standalone, independently-deployed contract, not a module of
-/// the upstream `stellar-accounts` crate, so it is not part of that crate's
-/// shared error-numbering convention. Numbering starts fresh at `1`.
+/// Standardized in the 300-399 range allocated for policies.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
     /// Only the `CallContract` context rule type is allowed.
-    InvalidContextRule = 1,
+    InvalidContextRule = 300,
     /// `spending_limit_usd` was not positive, `period_ledgers` was zero, or
     /// `allowed_tokens` was empty.
-    InvalidInstallParams = 2,
+    InvalidInstallParams = 301,
     /// The policy was already installed for this smart account and context
     /// rule.
-    AlreadyInstalled = 3,
+    AlreadyInstalled = 302,
     /// The smart account does not have this policy installed for this
     /// context rule.
-    NotInstalled = 4,
+    NotInstalled = 303,
     /// The target contract of the call is not in the installed allowlist.
-    TokenNotAllowed = 5,
+    TokenNotAllowed = 304,
     /// The context was not a `transfer` call, or its arguments could not be
     /// parsed.
-    InvalidTransferArgs = 6,
+    InvalidTransferArgs = 305,
     /// The oracle's price data is older than `MAX_STALENESS_LEDGERS`.
-    StaleOraclePrice = 7,
+    StaleOraclePrice = 306,
     /// Adding this transfer would exceed the rolling spending limit.
-    SpendingLimitExceeded = 8,
+    SpendingLimitExceeded = 307,
     /// The spending history reached `MAX_HISTORY_ENTRIES`.
-    HistoryCapacityExceeded = 9,
+    HistoryCapacityExceeded = 308,
     /// The oracle returned no price for the asset (`lastprice` gave `None`),
     /// a non-positive price, a price timestamped in the future, or a
     /// `decimals()` value that can't be used to build a base-10 divisor.
-    InvalidOracleResponse = 10,
+    InvalidOracleResponse = 309,
     /// An allowed token's `decimals()` call reverted, the address is not a
     /// SEP-41 token, or it reported a `decimals` value too large to build a
     /// base-10 divisor from.
-    InvalidTokenResponse = 11,
+    InvalidTokenResponse = 310,
     /// Converting a raw transfer amount to USD overflowed `i128`
     /// (`amount * price` before scaling down). Fails closed rather than
     /// wrapping or saturating to a value that could misstate the spend.
-    AmountConversionOverflow = 12,
+    AmountConversionOverflow = 311,
 }
 
 /// Installation parameters for the multi-token spending limit policy.

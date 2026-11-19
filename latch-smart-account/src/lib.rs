@@ -30,16 +30,16 @@ pub enum LatchSmartAccountStorageKey {
 
 /// Error codes for `LatchSmartAccount`'s own methods, distinct from
 /// `SmartAccountError` (the upstream `stellar-accounts` crate's error type,
-/// numbered 3000+). Numbered starting at 4000 so a raw error code seen on
-/// this contract is unambiguous about which enum it came from.
+/// numbered 3000+). Numbered in the 100-199 range allocated for smart accounts
+/// so cross-contract error codes remain unambiguous.
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(u32)]
 pub enum LatchSmartAccountError {
     /// No deployed contract is recorded at the requested index.
-    DeployedContractNotFound = 4000,
+    DeployedContractNotFound = 100,
     /// The deployed-contract counter has reached `u32::MAX`.
-    MathOverflow = 4001,
+    MathOverflow = 101,
 }
 
 /// Event emitted when this account deploys a satellite contract via
