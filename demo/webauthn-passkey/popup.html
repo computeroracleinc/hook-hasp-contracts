@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Latch WebAuthn Passkey Demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; width: 340px; padding: 14px; }
+    button { width: 100%; margin: 6px 0; padding: 8px; cursor: pointer; }
+    pre { background: #f4f4f6; padding: 8px; overflow-x: auto; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <h3>Latch WebAuthn Passkey</h3>
+  <button id="registerBtn">1. Register Passkey (P-256)</button>
+  <button id="signBtn" disabled>2. Sign Soroban Auth Hash</button>
+  <pre id="output">Ready.</pre>
+  <script src="popup.js"></script>
+</body>
+</html>

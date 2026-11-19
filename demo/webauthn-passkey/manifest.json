@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Latch WebAuthn Passkey Demo",
+  "version": "0.1.0",
+  "description": "Sample browser extension demonstrating WebAuthn passkey registration and Soroban auth signing for webauthn-verifier.",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "permissions": ["storage"]
+}

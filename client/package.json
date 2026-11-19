@@ -1,0 +1,17 @@
+{
+  "name": "@hook-hasp/client-tools",
+  "version": "0.1.0",
+  "description": "JSON-RPC error parser and multi-sig integration tests for Hook-Hasp (Latch)",
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

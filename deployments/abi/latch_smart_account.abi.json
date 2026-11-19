@@ -1,0 +1,40 @@
+{
+  "contract": "latch_smart_account",
+  "functions": [
+    {
+      "name": "__constructor",
+      "inputs": [
+        { "name": "signers", "type": "Vec<Signer>" },
+        { "name": "policies", "type": "Map<Address, Val>" }
+      ],
+      "outputs": []
+    },
+    {
+      "name": "batch_add_signer",
+      "inputs": [
+        { "name": "context_rule_id", "type": "u32" },
+        { "name": "signers", "type": "Vec<Signer>" }
+      ],
+      "outputs": []
+    },
+    {
+      "name": "deploy_contract",
+      "inputs": [
+        { "name": "wasm_hash", "type": "BytesN<32>" },
+        { "name": "salt", "type": "BytesN<32>" },
+        { "name": "constructor_args", "type": "Vec<Val>" }
+      ],
+      "outputs": ["Address"]
+    },
+    {
+      "name": "get_deployed_contract_count",
+      "inputs": [],
+      "outputs": ["u32"]
+    },
+    {
+      "name": "get_deployed_contract",
+      "inputs": [{ "name": "index", "type": "u32" }],
+      "outputs": ["DeployedContract"]
+    }
+  ]
+}
