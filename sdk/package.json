@@ -1,0 +1,20 @@
+{
+  "name": "@hook-hasp/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK bindings and session simulation utilities for Hook-Hasp (Latch) Soroban smart accounts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test test/*.test.ts",
+    "example:testnet": "tsx examples/testnet-deploy-and-execute.ts"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

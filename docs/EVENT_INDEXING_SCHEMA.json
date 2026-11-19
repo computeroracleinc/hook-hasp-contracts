@@ -1,0 +1,278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://latch.3k1.io/schemas/event-indexing-schema.v1.json",
+  "title": "Hook-Hasp / Latch Soroban Event Indexing Schema",
+  "description": "Structured Soroban contract event definitions for Mercury, SubQuery, and custom indexers.",
+  "version": "1.0.0",
+  "network": {
+    "sorobanProtocol": 22,
+    "sdkVersion": "26.1.0",
+    "topicEncoding": "ScVal XDR (base64)"
+  },
+  "contracts": {
+    "latch-smart-account": {
+      "events": [
+        {
+          "name": "contract_deployed",
+          "rustStruct": "ContractDeployed",
+          "description": "Emitted when the smart account deploys a satellite contract via deploy_contract.",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "contract_deployed" },
+            { "index": 1, "name": "address", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "wasm_hash", "type": "BytesN<32>", "encoding": "hex" }
+            ]
+          }
+        }
+      ]
+    },
+    "factory-contract": {
+      "events": [
+        {
+          "name": "account_created",
+          "rustStruct": "AccountCreated",
+          "description": "Emitted when the factory deploys a new deterministic LatchSmartAccount.",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "account_created" }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "account", "type": "Address" }
+            ]
+          }
+        }
+      ]
+    },
+    "session-policy": {
+      "events": [
+        {
+          "name": "session_installed",
+          "rustStruct": "SessionInstalled",
+          "description": "Emitted when a method allowlist session policy is installed for a context rule.",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "session_installed" },
+            { "index": 1, "name": "smart_account", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "context_rule_id", "type": "u32" },
+              { "name": "allowed_fns", "type": "Vec<Symbol>" }
+            ]
+          }
+        },
+        {
+          "name": "session_enforced",
+          "rustStruct": "SessionEnforced",
+          "description": "Emitted when a session policy permits a contract invocation.",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "session_enforced" },
+            { "index": 1, "name": "smart_account", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "context_rule_id", "type": "u32" },
+              { "name": "fn_name", "type": "Symbol" }
+            ]
+          }
+        },
+        {
+          "name": "session_uninstalled",
+          "rustStruct": "SessionUninstalled",
+          "description": "Emitted when a session policy is removed from a context rule.",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "session_uninstalled" },
+            { "index": 1, "name": "smart_account", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "context_rule_id", "type": "u32" }
+            ]
+          }
+        }
+      ]
+    },
+    "recipient-allowlist-policy": {
+      "events": [
+        {
+          "name": "recipient_installed",
+          "rustStruct": "RecipientInstalled",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "recipient_installed" },
+            { "index": 1, "name": "smart_account", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "context_rule_id", "type": "u32" },
+              { "name": "allowed_recipients", "type": "Vec<Address>" }
+            ]
+          }
+        },
+        {
+          "name": "recipient_enforced",
+          "rustStruct": "RecipientEnforced",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "recipient_enforced" },
+            { "index": 1, "name": "smart_account", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "context_rule_id", "type": "u32" },
+              { "name": "recipient", "type": "Address" }
+            ]
+          }
+        },
+        {
+          "name": "recipient_uninstalled",
+          "rustStruct": "RecipientUninstalled",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "recipient_uninstalled" },
+            { "index": 1, "name": "smart_account", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "context_rule_id", "type": "u32" }
+            ]
+          }
+        }
+      ]
+    },
+    "parameter-scoped-policy": {
+      "events": [
+        {
+          "name": "conditions_installed",
+          "rustStruct": "ConditionsInstalled",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "conditions_installed" },
+            { "index": 1, "name": "smart_account", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "context_rule_id", "type": "u32" }
+            ]
+          }
+        },
+        {
+          "name": "conditions_enforced",
+          "rustStruct": "ConditionsEnforced",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "conditions_enforced" },
+            { "index": 1, "name": "smart_account", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "context_rule_id", "type": "u32" },
+              { "name": "fn_name", "type": "Symbol" }
+            ]
+          }
+        },
+        {
+          "name": "conditions_uninstalled",
+          "rustStruct": "ConditionsUninstalled",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "conditions_uninstalled" },
+            { "index": 1, "name": "smart_account", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "context_rule_id", "type": "u32" }
+            ]
+          }
+        }
+      ]
+    },
+    "timelock-vault": {
+      "events": [
+        {
+          "name": "deposited",
+          "rustStruct": "Deposited",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "deposited" },
+            { "index": 1, "name": "token", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "from", "type": "Address" },
+              { "name": "amount", "type": "i128" }
+            ]
+          }
+        },
+        {
+          "name": "withdrawn",
+          "rustStruct": "Withdrawn",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "withdrawn" },
+            { "index": 1, "name": "token", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "to", "type": "Address" },
+              { "name": "amount", "type": "i128" }
+            ]
+          }
+        }
+      ]
+    },
+    "vesting-schedule": {
+      "events": [
+        {
+          "name": "schedule_created",
+          "rustStruct": "ScheduleCreated",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "schedule_created" },
+            { "index": 1, "name": "owner", "type": "Address", "indexed": true },
+            { "index": 2, "name": "token", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "total_amount", "type": "i128" },
+              { "name": "start_ledger", "type": "u32" },
+              { "name": "cliff_ledger", "type": "u32" },
+              { "name": "end_ledger", "type": "u32" }
+            ]
+          }
+        },
+        {
+          "name": "claimed",
+          "rustStruct": "Claimed",
+          "topics": [
+            { "index": 0, "name": "event_name", "type": "Symbol", "value": "claimed" },
+            { "index": 1, "name": "owner", "type": "Address", "indexed": true },
+            { "index": 2, "name": "to", "type": "Address", "indexed": true }
+          ],
+          "data": {
+            "type": "Map",
+            "fields": [
+              { "name": "amount", "type": "i128" },
+              { "name": "ledger", "type": "u32" }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "indexingGuidelines": {
+    "cursor": "ledgerSequence + pagingToken",
+    "idempotencyKey": "txHash + ':' + eventIndex",
+    "notes": [
+      "All #[contractevent] structs emit snake_case event_name as topic[0] Symbol.",
+      "Fields marked #[topic] appear as subsequent topic entries in declaration order.",
+      "Non-topic fields are encoded in the event value ScVal."
+    ]
+  }
+}
