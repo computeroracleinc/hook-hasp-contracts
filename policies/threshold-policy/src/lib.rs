@@ -98,3 +98,6 @@ impl ThresholdPolicy {
         simple_threshold::set_threshold(&e, threshold, &context_rule, &smart_account)
     }
 }
+
+#[cfg(test)]
+mod boundary_test;

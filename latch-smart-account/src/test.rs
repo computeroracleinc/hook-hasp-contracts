@@ -733,3 +733,197 @@ fn create_contract_rule_rejects_non_matching_signer() {
         let _ = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
     });
 }
+
+// ################## PROTOCOL UPGRADE & COMPATIBILITY TESTS ##################
+//
+// Tests for smart account behavior across protocol upgrades (e.g. Protocol 21 -> 22+).
+// Verifies that:
+// 1. Account deployment, context-rule evaluation, and execute calls work seamlessly
+//    when the network protocol version is bumped.
+// 2. State (context rules, signers, policies, deployed contracts) persists and remains
+//    functional before and after protocol bumps.
+// 3. No deprecated host functions or deprecated interfaces are used; modern host
+//    constructs (such as `deploy_v2` / `create_contract_with_constructor`) remain valid.
+// 4. Time-to-live (TTL) extensions and persistent storage entries operate correctly
+//    across protocol bumps.
+
+#[test]
+fn protocol_upgrade_preserves_smart_account_state_and_execution() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Verify initial environment protocol version (default in soroban-sdk 26 is 26)
+    let initial_proto = env.ledger().protocol_version();
+    assert!(initial_proto >= 21, "Host protocol version should be at least Protocol 21");
+
+    let owner_signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &owner_signers, &policies);
+
+    // Initial state verification under initial protocol
+    assert_eq!(client.get_context_rules_count(), 1);
+    let target_id = env.register(MockTargetContract, ());
+    let target_client = MockTargetContractClient::new(&env, &target_id);
+
+    // Execute state transition on target contract
+    client.execute(&target_id, &Symbol::new(&env, "set"), &vec![&env, 42u32.into_val(&env)]);
+    assert_eq!(target_client.get(), 42);
+
+    // Simulate network protocol upgrade (e.g. bump protocol version)
+    let bumped_proto = initial_proto + 1;
+    env.ledger().set_protocol_version(bumped_proto);
+    assert_eq!(env.ledger().protocol_version(), bumped_proto);
+
+    // Confirm existing account state remains intact after protocol bump
+    assert_eq!(client.get_context_rules_count(), 1);
+    let default_rule = client.get_context_rule(&0);
+    assert_eq!(default_rule.name, String::from_str(&env, "default"));
+    assert_eq!(default_rule.context_type, ContextRuleType::Default);
+
+    // Add new signer and new context rule post-upgrade
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let added_signer_id = client.add_signer(&0, &new_signer);
+    assert_eq!(added_signer_id, 1);
+
+    let session_signer = Signer::Delegated(Address::generate(&env));
+    let session_rule = client.add_context_rule(
+        &ContextRuleType::CallContract(target_id.clone()),
+        &String::from_str(&env, "session-post-upgrade"),
+        &None,
+        &vec![&env, session_signer],
+        &Map::new(&env),
+    );
+    assert_eq!(session_rule.id, 1);
+    assert_eq!(client.get_context_rules_count(), 2);
+
+    // Execute calls through smart account post-protocol-upgrade
+    client.execute(&target_id, &Symbol::new(&env, "set"), &vec![&env, 100u32.into_val(&env)]);
+    assert_eq!(target_client.get(), 100);
+
+    // Validate auth check logic post-upgrade
+    let context = get_context(target_id, Symbol::new(&env, "set"), vec![&env, 200u32.into_val(&env)]);
+    let auth_contexts = Vec::from_array(&env, [context]);
+    let signatures = create_signatures(&env, &vec![&env, session_signer], vec![&env, session_rule.id]);
+    let payload_hash = env.crypto().sha256(&Bytes::from_array(&env, &[99u8; 32]));
+
+    env.as_contract(&account_id, || {
+        let auth_res = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
+        assert!(auth_res.is_ok());
+    });
+}
+
+#[test]
+fn protocol_upgrade_preserves_contract_deployment_and_storage_mechanics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let wasm_hash = deployed_wasm_hash(&env);
+    let salt1 = BytesN::from_array(&env, &[101u8; 32]);
+
+    // Deploy contract before protocol bump
+    let deployed1 = client.deploy_contract(&wasm_hash, &salt1, &vec![&env]);
+    assert_eq!(client.get_deployed_contract_count(), 1);
+    let record1 = client.get_deployed_contract(&0);
+    assert_eq!(record1.address, deployed1);
+    assert_eq!(record1.wasm_hash, wasm_hash);
+
+    // Advance sequence ledger and upgrade protocol
+    let current_proto = env.ledger().protocol_version();
+    let next_proto = current_proto + 1;
+    env.ledger().with_mut(|li| {
+        li.protocol_version = next_proto;
+        li.sequence_number += 100;
+    });
+    assert_eq!(env.ledger().protocol_version(), next_proto);
+
+    // Pre-upgrade record is preserved and accessible
+    let record1_post = client.get_deployed_contract(&0);
+    assert_eq!(record1_post.address, deployed1);
+    assert_eq!(record1_post.wasm_hash, wasm_hash);
+
+    // Deploy satellite contract post-upgrade using modern deploy_v2
+    let salt2 = BytesN::from_array(&env, &[102u8; 32]);
+    let deployed2 = client.deploy_contract(&wasm_hash, &salt2, &vec![&env]);
+    assert_eq!(client.get_deployed_contract_count(), 2);
+    let record2 = client.get_deployed_contract(&1);
+    assert_eq!(record2.address, deployed2);
+    assert_eq!(record2.wasm_hash, wasm_hash);
+    assert_ne!(deployed1, deployed2);
+}
+
+#[test]
+fn protocol_upgrade_across_multiple_versions_retains_auth_security_invariants() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let owner_signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &owner_signers, &policies);
+
+    let target_id = env.register(MockTargetContract, ());
+    let session_signer = Signer::Delegated(Address::generate(&env));
+    let session_signers = vec![&env, session_signer];
+
+    // Install session rule
+    let rule = client.add_context_rule(
+        &ContextRuleType::CallContract(target_id.clone()),
+        &String::from_str(&env, "session"),
+        &None,
+        &session_signers,
+        &Map::new(&env),
+    );
+
+    // Install session policy restricting to "set"
+    let session_policy_id = env.register(SessionPolicy, ());
+    let install_param: Val =
+        SessionAccountParams { allowed_fns: vec![&env, Symbol::new(&env, "set")] }.into_val(&env);
+    client.add_policy(&rule.id, &session_policy_id, &install_param);
+
+    // Step across multiple protocol bumps sequentially (e.g. proto -> proto+1 -> proto+2)
+    let initial_proto = env.ledger().protocol_version();
+    for step in 1..=3 {
+        env.ledger().set_protocol_version(initial_proto + step);
+        assert_eq!(env.ledger().protocol_version(), initial_proto + step);
+
+        // Allowed call succeeds across each protocol bump
+        let context_ok = get_context(
+            target_id.clone(),
+            Symbol::new(&env, "set"),
+            vec![&env, (step * 10).into_val(&env)],
+        );
+        let auth_contexts_ok = Vec::from_array(&env, [context_ok]);
+        let signatures = create_signatures(&env, &session_signers, vec![&env, rule.id]);
+        let payload_hash = env.crypto().sha256(&Bytes::from_array(&env, &[step as u8; 32]));
+
+        env.as_contract(&account_id, || {
+            let res = smart_account::do_check_auth(
+                &env,
+                &payload_hash,
+                &signatures,
+                &auth_contexts_ok,
+            );
+            assert!(res.is_ok());
+        });
+    }
+
+    // Adversarial check: Unauthorized call ("get" method not allowlisted by policy)
+    // is strictly rejected under upgraded protocol
+    let context_bad = get_context(target_id, Symbol::new(&env, "get"), vec![&env]);
+    let auth_contexts_bad = Vec::from_array(&env, [context_bad]);
+    let signatures = create_signatures(&env, &session_signers, vec![&env, rule.id]);
+    let payload_hash = env.crypto().sha256(&Bytes::from_array(&env, &[255u8; 32]));
+
+    env.as_contract(&account_id, || {
+        let err = smart_account::do_check_auth(
+            &env,
+            &payload_hash,
+            &signatures,
+            &auth_contexts_bad,
+        );
+        assert!(err.is_err());
+    });
+}

@@ -124,3 +124,6 @@ impl WeightedThresholdPolicy {
         weighted_threshold::set_signer_weight(&e, &signer, weight, &context_rule, &smart_account)
     }
 }
+
+#[cfg(test)]
+mod boundary_test;
