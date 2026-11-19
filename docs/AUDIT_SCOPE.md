@@ -85,7 +85,9 @@ exercised anywhere in the workspace. Flagging rather than hiding it.
 All OpenZeppelin crates are pinned to `=0.7.2` (`stellar-accounts`, `stellar-contract-utils`,
 `stellar-fee-abstraction`, `stellar-access`, `stellar-macros`, `stellar-tokens`), the latest
 stable release, covered by OZ's own `v0.7.0` audit. `soroban-sdk` is `26.1`. No git or path
-dependencies. `Cargo.lock` is committed.
+dependencies. `Cargo.lock` is committed with immutable cryptographic SHA-256 digests for all
+dependencies. A formal SLSA compliance and build provenance assessment is documented in
+[`SLSA_COMPLIANCE_ASSESSMENT.md`](SLSA_COMPLIANCE_ASSESSMENT.md).
 
 ## Trust assumptions and privileged roles
 
