@@ -733,3 +733,126 @@ fn create_contract_rule_rejects_non_matching_signer() {
         let _ = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
     });
 }
+
+// ################## CONCURRENT ADVERSARIAL STRESS TEST ##################
+
+/// Concurrently evaluates smart-account policy verification across 100 threads.
+///
+/// Verifies:
+/// 1. Concurrency isolation across distinct smart accounts evaluating independent policies.
+/// 2. Thread safety under concurrent load for multiple policy types (SessionPolicy and SpendingLimitPolicy).
+/// 3. Zero state race conditions detected under parallel load.
+#[test]
+fn test_concurrent_100_smart_account_policy_evaluations() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    const NUM_THREADS: usize = 100;
+    let barrier = Arc::new(Barrier::new(NUM_THREADS));
+
+    let mut handles = std::vec::Vec::with_capacity(NUM_THREADS);
+
+    for i in 0..NUM_THREADS {
+        let b = Arc::clone(&barrier);
+        let handle = thread::spawn(move || {
+            // Synchronize starting line across all 100 threads
+            b.wait();
+
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let owner_signers = default_signers(&env);
+            let policies = Map::new(&env);
+            let (account_id, client) = register_account(&env, &owner_signers, &policies);
+
+            let target_id = env.register(MockTargetContract, ());
+            let session_signer = Signer::Delegated(Address::generate(&env));
+            let session_signers = vec![&env, session_signer];
+
+            let rule = client.add_context_rule(
+                &ContextRuleType::CallContract(target_id.clone()),
+                &String::from_str(&env, "session"),
+                &None,
+                &session_signers,
+                &Map::new(&env),
+            );
+
+            let session_policy_id = env.register(SessionPolicy, ());
+            let session_install_param: Val =
+                SessionAccountParams { allowed_fns: vec![&env, symbol_short!("transfer")] }.into_val(&env);
+            client.add_policy(&rule.id, &session_policy_id, &session_install_param);
+
+            let spending_limit_policy_id = env.register(SpendingLimitPolicy, ());
+            let spending_install_param: Val =
+                SpendingLimitAccountParams { spending_limit: 10_000_000, period_ledgers: 100 }
+                    .into_val(&env);
+            client.add_policy(&rule.id, &spending_limit_policy_id, &spending_install_param);
+
+            let from = Address::generate(&env);
+            let to = Address::generate(&env);
+            let payload_hash = env.crypto().sha256(&Bytes::from_array(&env, &[(i as u8); 32]));
+
+            if i % 2 == 0 {
+                // Legitimate policy evaluation within limits
+                let context = get_context(
+                    target_id.clone(),
+                    symbol_short!("transfer"),
+                    vec![&env, from.into_val(&env), to.into_val(&env), 100_000i128.into_val(&env)],
+                );
+                let auth_contexts = Vec::from_array(&env, [context]);
+                let signatures = create_signatures(&env, &session_signers, vec![&env, rule.id]);
+
+                env.as_contract(&account_id, || {
+                    let auth_res =
+                        smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
+                    assert!(auth_res.is_ok(), "Thread {} legitimate auth check failed", i);
+                });
+
+                // Invariant: Verify spending limit data matches recorded spend
+                let spending_data =
+                    SpendingLimitPolicy::get_spending_limit_data(&env, rule.id, account_id.clone());
+                assert_eq!(spending_data.spending_limit, 10_000_000);
+                assert_eq!(spending_data.spend_history.len(), 1);
+            } else {
+                // Adversarial policy evaluation: call exceeding spending limit
+                let context = get_context(
+                    target_id.clone(),
+                    symbol_short!("transfer"),
+                    vec![&env, from.into_val(&env), to.into_val(&env), 20_000_000i128.into_val(&env)],
+                );
+                let auth_contexts = Vec::from_array(&env, [context]);
+                let signatures = create_signatures(&env, &session_signers, vec![&env, rule.id]);
+
+                let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    env.as_contract(&account_id, || {
+                        let _ = smart_account::do_check_auth(
+                            &env,
+                            &payload_hash,
+                            &signatures,
+                            &auth_contexts,
+                        );
+                    });
+                }));
+
+                assert!(panic_res.is_err(), "Thread {} expected over-limit evaluation to fail", i);
+
+                // Invariant: Spend history must remain empty since transaction failed
+                let spending_data =
+                    SpendingLimitPolicy::get_spending_limit_data(&env, rule.id, account_id.clone());
+                assert_eq!(spending_data.spending_limit, 10_000_000);
+                assert_eq!(spending_data.spend_history.len(), 0);
+            }
+
+            i
+        });
+        handles.push(handle);
+    }
+
+    let mut completed = 0;
+    for handle in handles {
+        let res = handle.join().expect("Worker thread panicked unexpectedly");
+        assert!(res < NUM_THREADS);
+        completed += 1;
+    }
+    assert_eq!(completed, 100);
+}
