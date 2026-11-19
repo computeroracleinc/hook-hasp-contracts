@@ -1,0 +1,21 @@
+{
+  "maxRegressionPercent": 5.0,
+  "contracts": {
+    "latch_smart_account.wasm": 24576,
+    "factory_contract.wasm": 32768,
+    "ed25519_verifier.wasm": 8192,
+    "p256_verifier.wasm": 12288,
+    "secp256k1_verifier.wasm": 16384,
+    "webauthn_verifier.wasm": 16384,
+    "threshold_policy.wasm": 12288,
+    "weighted_threshold_policy.wasm": 14336,
+    "session_policy.wasm": 16384,
+    "parameter_scoped_policy.wasm": 24576,
+    "spending_limit_policy.wasm": 14336,
+    "multi_token_spending_limit_policy.wasm": 24576,
+    "recipient_allowlist_policy.wasm": 16384,
+    "fee_forwarder.wasm": 16384,
+    "timelock_vault.wasm": 12288,
+    "vesting_schedule.wasm": 20480
+  }
+}

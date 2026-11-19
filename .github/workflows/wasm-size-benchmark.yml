@@ -1,0 +1,33 @@
+name: WASM Size Benchmark
+
+on:
+  pull_request:
+    branches: [ "main", "experimental" ]
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  wasm-size-benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: stable
+          targets: wasm32v1-none
+
+      - name: Install stellar-cli
+        run: cargo install --locked stellar-cli --version 27.1.0
+
+      - name: Build release WASMs
+        run: stellar contract build
+
+      - name: Check WASM bytecode size against baseline
+        run: |
+          chmod +x scripts/check_wasm_size.sh
+          ./scripts/check_wasm_size.sh | tee -a "$GITHUB_STEP_SUMMARY"
