@@ -26,6 +26,8 @@ jobs:
   # for status to be reported".
   changes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
@@ -45,6 +47,8 @@ jobs:
   fmt:
     needs: changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -82,6 +86,8 @@ jobs:
   discover-workspace:
     needs: changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       workspace_dirs: ${{ steps.list.outputs.workspace_dirs }}
     steps:
@@ -102,6 +108,8 @@ jobs:
   build-and-test:
     needs: [changes, discover-workspace]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -150,6 +158,8 @@ jobs:
   wasm-build:
     needs: changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
