@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+# Pinned deterministic Docker environment for reproducible Soroban WASM contract compilation.
+# Stellar CLI: 27.1.0
+# Rust Toolchain: 1.84.0 (debian bookworm base) / stable with target wasm32v1-none
+
+FROM debian:bookworm-slim AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:$PATH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust toolchain pinned to 1.84.0 with wasm32v1-none target
+ARG RUST_VERSION=1.84.0
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION} \
+    && rustup target add wasm32v1-none \
+    && rustup component add rustfmt clippy
+
+# Install stellar-cli pinned to 27.1.0
+ARG STELLAR_CLI_VERSION=27.1.0
+RUN curl -sSL https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz \
+    | tar -xz -C /usr/local/bin \
+    && chmod +x /usr/local/bin/stellar
+
+WORKDIR /workspace
+
+# Copy workspace source files
+COPY . .
+
+# Set reproducible environment variables
+ENV SOURCE_DATE_EPOCH=1725364800
+ENV CARGO_TERM_COLOR=always
+
+# Build contracts using release profile and optimize
+ENTRYPOINT ["stellar", "contract", "build"]

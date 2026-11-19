@@ -38,6 +38,44 @@ are re-derived from the exact tagged tree, not carried over from a branch build.
 Do not describe the binaries below as the post-fix audit candidate. This record is replaced
 in full when the `audit-v1` commit is deployed to testnet.
 
+## Reproducible & Deterministic WASM Builds
+
+To satisfy supply-chain security requirements and anti-tamper verification, all contracts in this repository can be deterministically compiled into WASM binaries that match committed deployment artifacts bit-for-bit.
+
+### Pinned Environment Specifications
+- **Base image:** Debian Bookworm (`debian:bookworm-slim`)
+- **Stellar CLI:** `27.1.0` (optimizes release builds by default)
+- **Rust Toolchain:** `1.84.0` / `1.94.1` with `wasm32v1-none` target
+- **Cargo profile:** `release` (`opt-level = "z"`, `codegen-units = 1`, `lto = true`, `panic = "abort"`)
+- **Reproducible containerfile:** `Dockerfile.reproducible`
+
+### Step-by-Step Instructions
+
+#### Option 1: Automated Reproducible Build Script (Recommended)
+Run the automated Docker build and verification pipeline:
+```bash
+./scripts/build-reproducible.sh
+```
+This script:
+1. Builds the pinned Docker image `latch-contracts-reproducible:v27.1.0`.
+2. Compiles every workspace member inside the container via `stellar contract build`.
+3. Extracts the resulting WASM binaries to `target/wasm32v1-none/release/`.
+4. Runs `scripts/verify-artifacts.sh` to assert identical SHA256 hashes against canonical deployment artifacts.
+
+#### Option 2: Direct Stellar CLI Container Build
+If you already have `stellar-cli` installed locally, invoke the build directly using a pinned container image:
+```bash
+stellar contract build --image docker.io/stellar/stellar-cli:27.1.0
+```
+
+#### Option 3: Verification against Committed Deployment Artifacts
+To verify that compiled or archived artifacts match the recorded SHA256 checksums without building:
+```bash
+./scripts/verify-artifacts.sh
+```
+
+---
+
 ## Testnet — 2026-09-03, source commit `ace9dbd` (`audit-v1` pointed here until 2026-09-08)
 
 | Field | Value |
