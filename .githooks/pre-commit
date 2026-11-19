@@ -4,4 +4,5 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-exec "$REPO_ROOT/scripts/security_malware_check.sh" --staged
+"$REPO_ROOT/scripts/security_malware_check.sh" --staged
+exec "$REPO_ROOT/scripts/license_compliance_check.sh"
