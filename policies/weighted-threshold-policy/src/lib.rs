@@ -28,9 +28,10 @@
 //!
 //! # Security Warning: Signer Set Divergence
 //!
-//! Signer weights and the threshold are validated against each other only at
-//! install time. Neither is **automatically updated** when signers are later
-//! added to or removed from the account's `ContextRule`. Left unattended,
+//! Signer weights and the threshold are validated against each other at
+//! install time and after every dynamic update (`set_signer_weight` and
+//! `set_threshold`). Neither is **automatically updated** when signers are
+//! later added to or removed from the account's `ContextRule`. Left unattended,
 //! this causes:
 //!
 //! - **DoS**: removing a heavily-weighted signer can drop total available
@@ -48,14 +49,33 @@
 //! examples.
 #![no_std]
 
-use soroban_sdk::{auth::Context, contract, contractimpl, Address, Env, Map, Vec};
+use soroban_sdk::{
+    auth::Context, contract, contractimpl, panic_with_error, Address, Env, Map, Vec,
+};
 use stellar_accounts::{
-    policies::{weighted_threshold, weighted_threshold::WeightedThresholdAccountParams, Policy},
+    policies::{
+        weighted_threshold,
+        weighted_threshold::{WeightedThresholdAccountParams, WeightedThresholdError},
+        Policy,
+    },
     smart_account::{ContextRule, Signer},
 };
 
 #[contract]
 pub struct WeightedThresholdPolicy;
+
+fn validate_threshold(e: &Env, threshold: u32, signer_weights: &Map<Signer, u32>) {
+    let mut total_weight: u32 = 0;
+    for weight in signer_weights.values() {
+        total_weight = total_weight
+            .checked_add(weight)
+            .unwrap_or_else(|| panic_with_error!(e, WeightedThresholdError::MathOverflow));
+    }
+
+    if threshold == 0 || threshold > total_weight {
+        panic_with_error!(e, WeightedThresholdError::InvalidThreshold);
+    }
+}
 
 #[contractimpl]
 impl Policy for WeightedThresholdPolicy {
@@ -83,6 +103,7 @@ impl Policy for WeightedThresholdPolicy {
         context_rule: ContextRule,
         smart_account: Address,
     ) {
+        validate_threshold(e, install_params.threshold, &install_params.signer_weights);
         weighted_threshold::install(e, &install_params, &context_rule, &smart_account)
     }
 
@@ -111,6 +132,9 @@ impl WeightedThresholdPolicy {
         context_rule: ContextRule,
         smart_account: Address,
     ) {
+        let signer_weights =
+            weighted_threshold::get_signer_weights(&e, &context_rule, &smart_account);
+        validate_threshold(&e, threshold, &signer_weights);
         weighted_threshold::set_threshold(&e, threshold, &context_rule, &smart_account)
     }
 
@@ -121,6 +145,14 @@ impl WeightedThresholdPolicy {
         context_rule: ContextRule,
         smart_account: Address,
     ) {
+        let threshold = weighted_threshold::get_threshold(&e, context_rule.id, &smart_account);
+        let mut signer_weights =
+            weighted_threshold::get_signer_weights(&e, &context_rule, &smart_account);
+        signer_weights.set(signer.clone(), weight);
+        validate_threshold(&e, threshold, &signer_weights);
         weighted_threshold::set_signer_weight(&e, &signer, weight, &context_rule, &smart_account)
     }
 }
+
+#[cfg(test)]
+mod test;

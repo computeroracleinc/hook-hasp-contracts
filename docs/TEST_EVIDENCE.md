@@ -62,8 +62,9 @@ All other crates are unchanged from PR #88.
 | Account-deployed vesting contract | [vesting tests](../templates/vesting-schedule/src/test.rs): `test_end_to_end_deployment_and_claim_via_smart_account` | Deploys fixture WASM through an account and checks phased claims with a mock token. Uses `mock_all_auths`; is not proof of signature enforcement. |
 | Oracle-based policy | [multi-token tests](../policies/multi-token-spending-limit-policy/src/test.rs) | Calls a mock oracle for normal and malformed price responses; covers per-token `decimals()` normalization, mixed-decimal windows, dust truncation and the conversion-overflow path (`Tamper.2`). Uses a mock oracle and mock tokens — does not establish real feed accuracy or oracle-manipulation resistance. |
 
-The threshold and weighted-threshold wrappers have no dedicated test suites and no demonstrated
-real-wrapper integration here; factory tests use fixtures. The spending-limit wrapper has no
+The threshold wrapper still has no dedicated test suite and no demonstrated real-wrapper
+integration here; `weighted-threshold-policy` now has in-crate tests covering install and dynamic
+threshold/weight updates. Factory tests use fixtures. The spending-limit wrapper has no
 in-crate tests but account composition tests exercise spending-limit behavior. No count in this
 document is labeled “number of integration tests”: the total includes unit and cross-contract
 tests together.

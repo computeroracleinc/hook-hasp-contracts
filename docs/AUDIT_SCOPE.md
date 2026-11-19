@@ -60,10 +60,11 @@ checked USD conversion (threat-model `Tamper.2`, PR #90; now 33 tests). See
 deployable shell over audited OZ code, where the interesting questions are wiring and
 authorization (who can call what), not algorithmic.
 
-**Crates with no in-crate tests.** `threshold-policy`, `weighted-threshold-policy` and
-`spending-limit-policy` are single-file wrappers with no test module. `spending-limit-policy`
-is exercised end-to-end by `latch-smart-account`'s tests; the two threshold crates are not
-exercised anywhere in the workspace. Flagging rather than hiding it.
+**Crates with no in-crate tests.** `threshold-policy` and `spending-limit-policy` are
+single-file wrappers with no test module. `spending-limit-policy` is exercised end-to-end by
+`latch-smart-account`'s tests; `threshold-policy` is not exercised anywhere in the workspace.
+`weighted-threshold-policy` now has in-crate tests for the threshold/weight invariant. Flagging
+rather than hiding it.
 
 ## Explicitly out of scope
 
