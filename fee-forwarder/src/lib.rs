@@ -149,3 +149,6 @@ impl AccessControl for FeeForwarder {}
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod fuzz_test;
