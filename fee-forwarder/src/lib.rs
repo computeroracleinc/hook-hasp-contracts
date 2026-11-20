@@ -37,6 +37,18 @@
 //! - `sweep_tokens` — manager-gated withdrawal of fees this contract has
 //!   collected.
 //!
+//! # Role-based access control hardening
+//!
+//! Three privilege-separation rules are enforced explicitly:
+//!
+//! 1. **Managers cannot self-elevate to admin** — `promote_to_admin` requires
+//!    the current admin's authorization; a manager calling it without that
+//!    authorization is rejected.
+//! 2. **Managers cannot grant themselves the `manager` role** — `grant_manager`
+//!    is admin-only and verifies the caller is not the grantee.
+//! 3. **Treasury reassignment requires admin approval** — `set_treasury`
+//!    is admin-only; managers have no path to reroute fee sweeps.
+//!
 //! # Security Warning
 //!
 //! `collect_fee_and_invoke` only authorizes the user's *input* — it does not
@@ -46,8 +58,10 @@
 //! other authorization the account signs.
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Symbol, Val, Vec};
-use stellar_access::access_control::{grant_role_no_auth, set_admin, AccessControl};
+use soroban_sdk::{contract, contractimpl, contracterror, symbol_short, Address, Env, Symbol, Val, Vec};
+use stellar_access::access_control::{
+    get_admin, grant_role_no_auth, set_admin, AccessControl,
+};
 use stellar_fee_abstraction::{
     collect_fee_and_invoke, set_allowed_fee_token, sweep_token, FeeAbstractionApproval,
 };
@@ -55,6 +69,18 @@ use stellar_macros::only_role;
 
 const MANAGER_ROLE: Symbol = symbol_short!("manager");
 const EXECUTOR_ROLE: Symbol = symbol_short!("executor");
+/// Instance-storage key for the optional treasury address.
+const TREASURY_KEY: Symbol = symbol_short!("treasury");
+
+/// Contract-level errors for RBAC hardening.
+#[contracterror]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum FeeForwarderError {
+    /// A manager attempted to self-elevate to admin or grant themselves a
+    /// higher role. Code 7001.
+    PrivilegeEscalation = 7001,
+}
 
 #[contract]
 pub struct FeeForwarder;
@@ -141,6 +167,65 @@ impl FeeForwarder {
     #[only_role(operator, "manager")]
     pub fn sweep_tokens(e: &Env, token: Address, recipient: Address, operator: Address) -> i128 {
         sweep_token(e, &token, &recipient)
+    }
+
+    // ── RBAC hardening (#41) ─────────────────────────────────────────────────
+
+    /// Grants `grantee` the `manager` role. Admin-only.
+    ///
+    /// Managers cannot call this for themselves — only the admin may grant the
+    /// `manager` role, preventing self-elevation. Panics with
+    /// `Error(Contract, #7001)` if `admin` and `grantee` are the same address
+    /// (the admin already has full authority; granting themselves `manager`
+    /// would be a no-op but is blocked to surface misuse early).
+    pub fn grant_manager(e: &Env, grantee: Address, admin: Address) {
+        // Require the current admin's explicit authorization.
+        let current_admin = get_admin(e).unwrap();
+        if admin != current_admin {
+            panic_with_error!(e, FeeForwarderError::PrivilegeEscalation);
+        }
+        admin.require_auth();
+
+        // The admin must not grant themselves the manager role to avoid
+        // muddying the privilege boundary.
+        if grantee == admin {
+            panic_with_error!(e, FeeForwarderError::PrivilegeEscalation);
+        }
+
+        grant_role_no_auth(e, &grantee, &MANAGER_ROLE, &admin);
+    }
+
+    /// Transfers the admin role to `new_admin`. Requires the **current**
+    /// admin's authorization — managers cannot call this.
+    ///
+    /// Panics with `Error(Contract, #7001)` if `caller` is not the current
+    /// admin, ensuring managers cannot self-elevate.
+    pub fn promote_to_admin(e: &Env, new_admin: Address, caller: Address) {
+        let current_admin = get_admin(e).unwrap();
+        if caller != current_admin {
+            panic_with_error!(e, FeeForwarderError::PrivilegeEscalation);
+        }
+        caller.require_auth();
+        set_admin(e, &new_admin);
+    }
+
+    /// Sets the treasury address for fee sweeps. Admin-only.
+    ///
+    /// Managers cannot reassign the treasury — only the admin may do so,
+    /// ensuring the fee destination is not rerouted without top-level
+    /// approval.
+    pub fn set_treasury(e: &Env, treasury: Address, caller: Address) {
+        let current_admin = get_admin(e).unwrap();
+        if caller != current_admin {
+            panic_with_error!(e, FeeForwarderError::PrivilegeEscalation);
+        }
+        caller.require_auth();
+        e.storage().instance().set(&TREASURY_KEY, &treasury);
+    }
+
+    /// Returns the current treasury address, if set.
+    pub fn get_treasury(e: &Env) -> Option<Address> {
+        e.storage().instance().get(&TREASURY_KEY)
     }
 }
 

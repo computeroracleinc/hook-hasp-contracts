@@ -15,6 +15,7 @@ use soroban_sdk::{
 use stellar_tokens::fungible::{Base, FungibleToken};
 
 use super::{FeeForwarder, FeeForwarderClient};
+use super::FeeForwarderError;
 
 #[contract]
 pub struct MockToken;
@@ -613,4 +614,90 @@ fn constructor_grants_admin_manager_and_executor_roles() {
     assert!(s.fee_forwarder.has_role(&s.manager, &Symbol::new(&e, "manager")).is_some());
     assert!(s.fee_forwarder.has_role(&s.relayer, &Symbol::new(&e, "executor")).is_some());
     assert_eq!(s.fee_forwarder.get_admin(), Some(s.admin.clone()));
+}
+
+// ── RBAC hardening: privilege separation (#41) ───────────────────────────────
+//
+// Verifies strict Admin > Manager > Executor privilege separation:
+//   - Managers cannot elevate themselves to admin.
+//   - Managers cannot grant themselves the manager role.
+//   - Treasury reassignment requires admin authorization, not manager.
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7001)")]
+fn manager_cannot_self_elevate_to_admin() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // Manager attempts to transfer admin to themselves — must be rejected.
+    s.fee_forwarder.promote_to_admin(&s.manager, &s.manager);
+}
+
+#[test]
+fn admin_can_promote_to_admin() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let new_admin = Address::generate(&e);
+    s.fee_forwarder.promote_to_admin(&new_admin, &s.admin);
+    assert_eq!(s.fee_forwarder.get_admin(), Some(new_admin));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7001)")]
+fn manager_cannot_grant_manager_role_to_self() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // Manager passes themselves as both grantee and caller — must be rejected.
+    s.fee_forwarder.grant_manager(&s.manager, &s.manager);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7001)")]
+fn non_admin_cannot_grant_manager_role() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let new_manager = Address::generate(&e);
+    // Manager tries to elevate a third party — only admin may grant this role.
+    s.fee_forwarder.grant_manager(&new_manager, &s.manager);
+}
+
+#[test]
+fn admin_can_grant_manager_role() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let new_manager = Address::generate(&e);
+    s.fee_forwarder.grant_manager(&new_manager, &s.admin);
+    assert!(s.fee_forwarder.has_role(&new_manager, &Symbol::new(&e, "manager")).is_some());
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7001)")]
+fn manager_cannot_reassign_treasury() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let new_treasury = Address::generate(&e);
+    // Manager attempts to redirect fee sweeps — must be rejected.
+    s.fee_forwarder.set_treasury(&new_treasury, &s.manager);
+}
+
+#[test]
+fn admin_can_set_treasury() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let treasury = Address::generate(&e);
+    s.fee_forwarder.set_treasury(&treasury, &s.admin);
+    assert_eq!(s.fee_forwarder.get_treasury(), Some(treasury));
 }
