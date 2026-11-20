@@ -614,3 +614,187 @@ fn constructor_grants_admin_manager_and_executor_roles() {
     assert!(s.fee_forwarder.has_role(&s.relayer, &Symbol::new(&e, "executor")).is_some());
     assert_eq!(s.fee_forwarder.get_admin(), Some(s.admin.clone()));
 }
+
+// ── Treasury timelock ────────────────────────────────────────────────────────
+
+use crate::TREASURY_TIMELOCK_LEDGERS;
+
+#[test]
+fn propose_treasury_stores_pending_proposal() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let new_treasury = Address::generate(&e);
+    s.fee_forwarder.propose_treasury(&new_treasury, &s.manager);
+
+    let proposal = s.fee_forwarder.get_pending_treasury().expect("proposal must exist");
+    assert_eq!(proposal.new_treasury, new_treasury);
+    assert_eq!(proposal.eligible_ledger, e.ledger().sequence() + TREASURY_TIMELOCK_LEDGERS);
+}
+
+#[test]
+#[should_panic]
+fn execute_treasury_change_reverts_before_timelock_elapses() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let new_treasury = Address::generate(&e);
+    s.fee_forwarder.propose_treasury(&new_treasury, &s.manager);
+
+    // Try to execute immediately — timelock has not elapsed.
+    s.fee_forwarder.execute_treasury_change(&s.manager);
+}
+
+#[test]
+fn execute_treasury_change_succeeds_after_timelock_elapses() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let new_treasury = Address::generate(&e);
+    s.fee_forwarder.propose_treasury(&new_treasury, &s.manager);
+
+    // Advance ledger past the timelock delay.
+    e.ledger().set_sequence_number(e.ledger().sequence() + TREASURY_TIMELOCK_LEDGERS);
+
+    s.fee_forwarder.execute_treasury_change(&s.manager);
+
+    // Active treasury is now set; pending proposal is cleared.
+    assert_eq!(s.fee_forwarder.get_treasury(), Some(new_treasury.clone()));
+    assert!(s.fee_forwarder.get_pending_treasury().is_none());
+}
+
+#[test]
+fn sweep_tokens_uses_active_treasury_once_set() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // Forward a call to collect some fees.
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+
+    // Propose, wait, execute the treasury change.
+    let treasury = Address::generate(&e);
+    s.fee_forwarder.propose_treasury(&treasury, &s.manager);
+    e.ledger().set_sequence_number(e.ledger().sequence() + TREASURY_TIMELOCK_LEDGERS);
+    s.fee_forwarder.execute_treasury_change(&s.manager);
+
+    // Sweep: recipient arg is ignored once a treasury is active.
+    let other_recipient = Address::generate(&e);
+    let swept = s.fee_forwarder.sweep_tokens(&s.token.address, &other_recipient, &s.manager);
+
+    assert_eq!(swept, s.fee_amount);
+    // Fees went to the treasury, not to other_recipient.
+    assert_eq!(s.token.balance(&treasury), s.fee_amount);
+    assert_eq!(s.token.balance(&other_recipient), 0);
+}
+
+#[test]
+fn cancel_treasury_change_removes_pending_proposal() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let new_treasury = Address::generate(&e);
+    s.fee_forwarder.propose_treasury(&new_treasury, &s.manager);
+    assert!(s.fee_forwarder.get_pending_treasury().is_some());
+
+    s.fee_forwarder.cancel_treasury_change(&s.manager);
+
+    assert!(s.fee_forwarder.get_pending_treasury().is_none());
+    assert!(s.fee_forwarder.get_treasury().is_none());
+}
+
+#[test]
+#[should_panic]
+fn execute_treasury_change_reverts_with_no_proposal() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    s.fee_forwarder.execute_treasury_change(&s.manager);
+}
+
+#[test]
+#[should_panic]
+fn cancel_treasury_change_reverts_with_no_proposal() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    s.fee_forwarder.cancel_treasury_change(&s.manager);
+}
+
+#[test]
+fn propose_treasury_overwrites_existing_pending_proposal() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let treasury_a = Address::generate(&e);
+    let treasury_b = Address::generate(&e);
+
+    s.fee_forwarder.propose_treasury(&treasury_a, &s.manager);
+    // Advance slightly (not past the full timelock) then re-propose.
+    e.ledger().set_sequence_number(e.ledger().sequence() + 100);
+    s.fee_forwarder.propose_treasury(&treasury_b, &s.manager);
+
+    let proposal = s.fee_forwarder.get_pending_treasury().expect("proposal must exist");
+    // The latest proposal wins; eligible_ledger is re-anchored to now.
+    assert_eq!(proposal.new_treasury, treasury_b);
+    assert_eq!(proposal.eligible_ledger, e.ledger().sequence() + TREASURY_TIMELOCK_LEDGERS);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2000)")]
+fn propose_treasury_rejects_non_manager() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let not_manager = Address::generate(&e);
+    s.fee_forwarder.propose_treasury(&Address::generate(&e), &not_manager);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2000)")]
+fn execute_treasury_change_rejects_non_manager() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let new_treasury = Address::generate(&e);
+    s.fee_forwarder.propose_treasury(&new_treasury, &s.manager);
+    e.ledger().set_sequence_number(e.ledger().sequence() + TREASURY_TIMELOCK_LEDGERS);
+
+    let not_manager = Address::generate(&e);
+    s.fee_forwarder.execute_treasury_change(&not_manager);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2000)")]
+fn cancel_treasury_change_rejects_non_manager() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    s.fee_forwarder.propose_treasury(&Address::generate(&e), &s.manager);
+
+    let not_manager = Address::generate(&e);
+    s.fee_forwarder.cancel_treasury_change(&not_manager);
+}
