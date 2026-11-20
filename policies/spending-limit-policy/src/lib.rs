@@ -38,6 +38,11 @@ struct CompactSpendingLimitData {
     cached_total_spent: i128,
 }
 
+#[contracttype]
+enum CompactStorageKey {
+    AccountContext(Address, u32),
+}
+
 const DAY_IN_LEDGERS: u32 = 17280;
 const POLICY_EXTEND_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
 const POLICY_TTL_THRESHOLD: u32 = POLICY_EXTEND_AMOUNT - DAY_IN_LEDGERS;
@@ -124,20 +129,26 @@ fn expand_data(e: &Env, data: CompactSpendingLimitData) -> SpendingLimitData {
 }
 
 fn load_data(e: &Env, context_rule_id: u32, smart_account: &Address) -> SpendingLimitData {
-    let key = SpendingLimitStorageKey::AccountContext(smart_account.clone(), context_rule_id);
-    let data = e
-        .storage()
-        .persistent()
-        .get::<_, CompactSpendingLimitData>(&key)
-        .inspect(|_| {
-            e.storage().persistent().extend_ttl(
-                &key,
-                POLICY_TTL_THRESHOLD,
-                POLICY_EXTEND_AMOUNT,
-            );
-        })
-        .unwrap_or_else(|| panic_with_error!(e, SpendingLimitError::SmartAccountNotInstalled));
-    expand_data(e, data)
+    let key = CompactStorageKey::AccountContext(smart_account.clone(), context_rule_id);
+    if let Some(data) = e.storage().persistent().get::<_, CompactSpendingLimitData>(&key) {
+        e.storage().persistent().extend_ttl(&key, POLICY_TTL_THRESHOLD, POLICY_EXTEND_AMOUNT);
+        return expand_data(e, data);
+    }
+
+    let legacy_key =
+        SpendingLimitStorageKey::AccountContext(smart_account.clone(), context_rule_id);
+    if let Some(data) = e.storage().persistent().get::<_, SpendingLimitData>(&legacy_key) {
+        e.storage().persistent().extend_ttl(
+            &legacy_key,
+            POLICY_TTL_THRESHOLD,
+            POLICY_EXTEND_AMOUNT,
+        );
+        e.storage().persistent().set(&key, &compress_data(e, data.clone()));
+        e.storage().persistent().remove(&legacy_key);
+        return data;
+    }
+
+    panic_with_error!(e, SpendingLimitError::SmartAccountNotInstalled)
 }
 
 fn save_data(
@@ -146,7 +157,7 @@ fn save_data(
     smart_account: &Address,
     data: SpendingLimitData,
 ) {
-    let key = SpendingLimitStorageKey::AccountContext(smart_account.clone(), context_rule_id);
+    let key = CompactStorageKey::AccountContext(smart_account.clone(), context_rule_id);
     e.storage().persistent().set(&key, &compress_data(e, data));
 }
 
@@ -257,8 +268,10 @@ impl Policy for SpendingLimitPolicy {
             panic_with_error!(e, SpendingLimitError::InvalidLimitOrPeriod)
         }
 
-        let key = SpendingLimitStorageKey::AccountContext(smart_account.clone(), context_rule.id);
-        if e.storage().persistent().has(&key) {
+        let key = CompactStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+        let legacy_key =
+            SpendingLimitStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+        if e.storage().persistent().has(&key) || e.storage().persistent().has(&legacy_key) {
             panic_with_error!(e, SpendingLimitError::AlreadyInstalled)
         }
 
@@ -281,11 +294,14 @@ impl Policy for SpendingLimitPolicy {
 
     fn uninstall(e: &Env, context_rule: ContextRule, smart_account: Address) {
         smart_account.require_auth();
-        let key = SpendingLimitStorageKey::AccountContext(smart_account.clone(), context_rule.id);
-        if !e.storage().persistent().has(&key) {
+        let key = CompactStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+        let legacy_key =
+            SpendingLimitStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+        if !e.storage().persistent().has(&key) && !e.storage().persistent().has(&legacy_key) {
             panic_with_error!(e, SpendingLimitError::SmartAccountNotInstalled)
         }
         e.storage().persistent().remove(&key);
+        e.storage().persistent().remove(&legacy_key);
 
         spending_limit::SpendingLimitUninstalled {
             smart_account,
