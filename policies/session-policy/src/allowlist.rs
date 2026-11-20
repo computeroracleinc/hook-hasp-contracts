@@ -249,6 +249,24 @@ pub fn install(
     .publish(e);
 }
 
+/// Reclaims all persistent storage associated with the session policy for the
+/// given smart account and context rule. Unlike [`uninstall`], this is
+/// idempotent: it succeeds even when the entry is already absent or has
+/// expired, allowing users to reclaim storage rent without a live entry.
+/// Requires authorization from the smart account.
+///
+/// # Arguments
+///
+/// * `e` - Access to the Soroban environment.
+/// * `context_rule` - The context rule for this policy.
+/// * `smart_account` - The address of the smart account.
+pub fn reclaim_storage(e: &Env, context_rule: &ContextRule, smart_account: &Address) {
+    smart_account.require_auth();
+
+    let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+    e.storage().persistent().remove(&key);
+}
+
 /// Uninstalls the session policy from a smart account, removing all stored
 /// allowlist data for the account and context rule. Requires authorization
 /// from the smart account.

@@ -52,6 +52,13 @@ impl ParameterScopedPolicy {
     ) -> Map<Symbol, Vec<Condition>> {
         conditions::get_conditions(e, context_rule_id, &smart_account)
     }
+
+    /// Reclaims all persistent storage for the given smart account and context
+    /// rule. Idempotent — succeeds even when the entry is already absent or
+    /// expired. Requires authorization from the smart account.
+    pub fn reclaim_storage(e: &Env, context_rule: ContextRule, smart_account: Address) {
+        conditions::reclaim_storage(e, &context_rule, &smart_account)
+    }
 }
 
 #[cfg(test)]

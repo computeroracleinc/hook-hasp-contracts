@@ -447,6 +447,24 @@ impl MultiTokenSpendingLimitPolicy {
     pub fn get_policy_data(e: &Env, context_rule_id: u32, smart_account: Address) -> PolicyData {
         get_policy_data(e, context_rule_id, &smart_account)
     }
+
+    /// Reclaims all persistent storage associated with this policy for the
+    /// given smart account and context rule. Unlike `uninstall`, this is
+    /// idempotent: it succeeds even when the entry is already absent or has
+    /// expired, allowing users to reclaim storage rent without a live entry.
+    /// Requires authorization from the smart account.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - Access to the Soroban environment.
+    /// * `context_rule_id` - The context rule ID for this policy.
+    /// * `smart_account` - The address of the smart account.
+    pub fn reclaim_storage(e: &Env, context_rule_id: u32, smart_account: Address) {
+        smart_account.require_auth();
+
+        let key = DataKey::AccountContext(smart_account, context_rule_id);
+        e.storage().persistent().remove(&key);
+    }
 }
 
 #[cfg(test)]

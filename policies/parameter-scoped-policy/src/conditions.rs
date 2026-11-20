@@ -335,3 +335,14 @@ pub fn uninstall(e: &Env, context_rule: &ContextRule, smart_account: &Address) {
     e.storage().persistent().remove(&key);
     emit_conditions_uninstalled(e, smart_account.clone(), context_rule.id);
 }
+
+/// Reclaims all persistent storage associated with the parameter-scoped policy
+/// for the given smart account and context rule. Unlike [`uninstall`], this is
+/// idempotent: it succeeds even when the entry is already absent or has
+/// expired, allowing users to reclaim storage rent without a live entry.
+/// Requires authorization from the smart account.
+pub fn reclaim_storage(e: &Env, context_rule: &ContextRule, smart_account: &Address) {
+    smart_account.require_auth();
+    let key = ParameterScopedStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+    e.storage().persistent().remove(&key);
+}
