@@ -57,6 +57,9 @@ fn install_success() {
         let allowed_fns = get_allowed_fns(&e, context_rule.id, &smart_account);
         assert_eq!(allowed_fns.len(), 2);
         assert!(allowed_fns.contains(&symbol_short!("set")));
+        let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+        assert!(e.storage().temporary().has(&key));
+        assert!(!e.storage().persistent().has(&key));
 
         // Verify install event was emitted
         assert_eq!(e.events().all().events().len(), 1);
@@ -286,7 +289,7 @@ fn uninstall_success() {
 
     e.as_contract(&address, || {
         let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
-        assert!(!e.storage().persistent().has(&key));
+        assert!(!e.storage().temporary().has(&key));
     });
 }
 
