@@ -614,3 +614,124 @@ fn constructor_grants_admin_manager_and_executor_roles() {
     assert!(s.fee_forwarder.has_role(&s.relayer, &Symbol::new(&e, "executor")).is_some());
     assert_eq!(s.fee_forwarder.get_admin(), Some(s.admin.clone()));
 }
+
+// ── max payload size ─────────────────────────────────────────────────────────
+
+#[test]
+fn max_payload_size_is_unset_by_default() {
+    let e = Env::default();
+    let s = setup(&e);
+    assert_eq!(s.fee_forwarder.max_payload_size(), None);
+}
+
+#[test]
+fn set_and_get_max_payload_size() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    s.fee_forwarder.set_max_payload_size(&1024_u32, &s.manager);
+    assert_eq!(s.fee_forwarder.max_payload_size(), Some(1024));
+}
+
+#[test]
+fn set_max_payload_size_zero_removes_limit() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    s.fee_forwarder.set_max_payload_size(&1024_u32, &s.manager);
+    s.fee_forwarder.set_max_payload_size(&0_u32, &s.manager);
+    assert_eq!(s.fee_forwarder.max_payload_size(), None);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2000)")]
+fn set_max_payload_size_rejects_non_manager() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let not_manager = Address::generate(&e);
+    s.fee_forwarder.set_max_payload_size(&1024_u32, &not_manager);
+}
+
+#[test]
+fn forward_accepts_payload_within_limit() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // Set a generous limit — the empty-args call must fit within it.
+    s.fee_forwarder.set_max_payload_size(&8192_u32, &s.manager);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // Should succeed without panicking.
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn forward_rejects_oversized_payload() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // Set an extremely small limit so that even a minimal args vec exceeds it.
+    s.fee_forwarder.set_max_payload_size(&1_u32, &s.manager);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+}
+
+#[test]
+fn forward_skips_payload_check_when_no_limit_set() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // No limit configured: forward should succeed regardless of payload size.
+    assert_eq!(s.fee_forwarder.max_payload_size(), None);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+}

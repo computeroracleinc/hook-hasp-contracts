@@ -36,6 +36,11 @@
 //!   `stellar_fee_abstraction::is_allowed_fee_token`.
 //! - `sweep_tokens` — manager-gated withdrawal of fees this contract has
 //!   collected.
+//! - `set_max_payload_size` / `max_payload_size` — manager-gated configuration
+//!   of the maximum permitted `target_args` byte length. When set, `forward`
+//!   rejects any call whose serialised `target_args` exceeds the limit,
+//!   protecting host memory from oversized calldata payloads. The check is
+//!   skipped while no limit is configured.
 //!
 //! # Security Warning
 //!
@@ -46,7 +51,7 @@
 //! other authorization the account signs.
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Symbol, Val, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Val, Vec};
 use stellar_access::access_control::{grant_role_no_auth, set_admin, AccessControl};
 use stellar_fee_abstraction::{
     collect_fee_and_invoke, set_allowed_fee_token, sweep_token, FeeAbstractionApproval,
@@ -55,6 +60,21 @@ use stellar_macros::only_role;
 
 const MANAGER_ROLE: Symbol = symbol_short!("manager");
 const EXECUTOR_ROLE: Symbol = symbol_short!("executor");
+
+/// Storage key for the maximum permitted `target_args` serialised byte length.
+#[contracttype]
+enum DataKey {
+    MaxPayloadSize,
+}
+
+/// Errors specific to this contract.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum FeeForwarderError {
+    /// `target_args` serialised byte length exceeds the configured maximum.
+    PayloadTooLarge = 1,
+}
 
 #[contract]
 pub struct FeeForwarder;
@@ -83,6 +103,8 @@ impl FeeForwarder {
     ///
     /// # Errors
     ///
+    /// * [`FeeForwarderError::PayloadTooLarge`] - If the serialised byte
+    ///   length of `target_args` exceeds the configured maximum payload size.
     /// * [`stellar_fee_abstraction::FeeAbstractionError::FeeTokenNotAllowed`]
     ///   - If `fee_token` is not on the allowlist (once the allowlist is
     ///     enabled).
@@ -109,6 +131,14 @@ impl FeeForwarder {
         user: Address,
         relayer: Address,
     ) -> Val {
+        // Enforce maximum payload size if a limit has been configured.
+        if let Some(max_bytes) = Self::max_payload_size(e) {
+            let serialised_len = target_args.to_xdr(e).len() as u32;
+            if serialised_len > max_bytes {
+                panic_with_error!(e, FeeForwarderError::PayloadTooLarge);
+            }
+        }
+
         collect_fee_and_invoke(
             e,
             &fee_token,
@@ -122,6 +152,23 @@ impl FeeForwarder {
             &e.current_contract_address(),
             FeeAbstractionApproval::Lazy,
         )
+    }
+
+    /// Sets the maximum permitted `target_args` serialised byte length.
+    /// Passing `0` removes the limit. Manager-gated.
+    #[only_role(operator, "manager")]
+    pub fn set_max_payload_size(e: &Env, max_bytes: u32, operator: Address) {
+        if max_bytes == 0 {
+            e.storage().instance().remove(&DataKey::MaxPayloadSize);
+        } else {
+            e.storage().instance().set(&DataKey::MaxPayloadSize, &max_bytes);
+        }
+    }
+
+    /// Returns the current maximum `target_args` byte length, or `None` if
+    /// no limit is configured.
+    pub fn max_payload_size(e: &Env) -> Option<u32> {
+        e.storage().instance().get(&DataKey::MaxPayloadSize)
     }
 
     /// Adds `token` to the fee-token allowlist. Manager-gated.
