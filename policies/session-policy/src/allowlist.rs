@@ -6,11 +6,10 @@
 //! ephemeral signer with this policy so the session key may only invoke the
 //! allowlisted functions on that one contract.
 //!
-//! Session expiry and revocation are intentionally not reimplemented here —
-//! they are already provided by the smart account's own `ContextRule`
-//! machinery (`valid_until` and `remove_context_rule`). This policy only
-//! adds the one thing the account model doesn't already provide: narrowing
-//! a `CallContract` rule down to specific function names.
+//! Session expiry and revocation are provided by the smart account's own
+//! `ContextRule` machinery (`valid_until` and `remove_context_rule`). This
+//! policy stores its allowlists in temporary storage and refreshes their
+//! lifetime while the session is active, avoiding persistent-storage rent.
 use soroban_sdk::{
     auth::{Context, ContractContext},
     contracterror, contractevent, contracttype, panic_with_error, Address, Env, Symbol, Vec,
@@ -107,7 +106,8 @@ pub const MAX_ALLOWED_FNS: u32 = 10;
 
 // ################## QUERY STATE ##################
 
-/// Retrieves the allowlist for a smart account's session policy.
+/// Retrieves the allowlist for a smart account's session policy and refreshes
+/// its temporary-storage lifetime.
 ///
 /// # Arguments
 ///
@@ -121,14 +121,19 @@ pub const MAX_ALLOWED_FNS: u32 = 10;
 ///   not have a session policy installed.
 pub fn get_allowed_fns(e: &Env, context_rule_id: u32, smart_account: &Address) -> Vec<Symbol> {
     let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule_id);
-    e.storage()
-        .persistent()
-        .get::<_, SessionData>(&key)
-        .inspect(|_| {
-            e.storage().persistent().extend_ttl(&key, SESSION_TTL_THRESHOLD, SESSION_EXTEND_AMOUNT);
-        })
-        .map(|data| data.allowed_fns)
-        .unwrap_or_else(|| panic_with_error!(e, SessionError::SmartAccountNotInstalled))
+    if let Some(data) = e.storage().temporary().get::<_, SessionData>(&key) {
+        e.storage().temporary().extend_ttl(&key, SESSION_TTL_THRESHOLD, SESSION_EXTEND_AMOUNT);
+        return data.allowed_fns;
+    }
+
+    if let Some(data) = e.storage().persistent().get::<_, SessionData>(&key) {
+        e.storage().persistent().remove(&key);
+        e.storage().temporary().set(&key, &data);
+        e.storage().temporary().extend_ttl(&key, SESSION_TTL_THRESHOLD, SESSION_EXTEND_AMOUNT);
+        return data.allowed_fns;
+    }
+
+    panic_with_error!(e, SessionError::SmartAccountNotInstalled)
 }
 
 // ################## CHANGE STATE ##################
@@ -233,13 +238,14 @@ pub fn install(
 
     let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
 
-    if e.storage().persistent().has(&key) {
+    if e.storage().temporary().has(&key) || e.storage().persistent().has(&key) {
         panic_with_error!(e, SessionError::AlreadyInstalled)
     }
 
     let data = SessionData { allowed_fns: params.allowed_fns.clone() };
 
-    e.storage().persistent().set(&key, &data);
+    e.storage().temporary().set(&key, &data);
+    e.storage().temporary().extend_ttl(&key, SESSION_TTL_THRESHOLD, SESSION_EXTEND_AMOUNT);
 
     SessionInstalled {
         smart_account: smart_account.clone(),
@@ -274,10 +280,11 @@ pub fn uninstall(e: &Env, context_rule: &ContextRule, smart_account: &Address) {
 
     let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
 
-    if !e.storage().persistent().has(&key) {
+    if !e.storage().temporary().has(&key) && !e.storage().persistent().has(&key) {
         panic_with_error!(e, SessionError::SmartAccountNotInstalled)
     }
 
+    e.storage().temporary().remove(&key);
     e.storage().persistent().remove(&key);
 
     SessionUninstalled { smart_account: smart_account.clone(), context_rule_id: context_rule.id }
