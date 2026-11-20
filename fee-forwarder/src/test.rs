@@ -614,3 +614,72 @@ fn constructor_grants_admin_manager_and_executor_roles() {
     assert!(s.fee_forwarder.has_role(&s.relayer, &Symbol::new(&e, "executor")).is_some());
     assert_eq!(s.fee_forwarder.get_admin(), Some(s.admin.clone()));
 }
+
+// ── tiered relayer refund rates (#45) ───────────────────────────────────────
+
+/// Tiers used by the three tier tests:
+///   tier 0 — threshold   0, multiplier  2 (×0.002/gas)
+///   tier 1 — threshold 1_000, multiplier  5 (×0.005/gas)
+///   tier 2 — threshold 10_000, multiplier 10 (×0.010/gas)
+fn configure_tiers(s: &Setup, e: &Env) {
+    let base_fee: i128 = 100;
+    let thresholds = vec![e, 0_u64, 1_000_u64, 10_000_u64];
+    let multipliers = vec![e, 2_u32, 5_u32, 10_u32];
+    s.fee_forwarder.set_gas_tier_config(&base_fee, &thresholds, &multipliers, &s.manager);
+}
+
+#[test]
+fn tiered_refund_low_gas_uses_first_tier() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+    configure_tiers(&s, &e);
+
+    // 500 gas → tier 0 (multiplier 2): 100 + 500 * 2 / 1_000 = 101
+    assert_eq!(s.fee_forwarder.compute_tiered_refund(&500_u64), 101);
+}
+
+#[test]
+fn tiered_refund_mid_gas_uses_second_tier() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+    configure_tiers(&s, &e);
+
+    // 5_000 gas → tier 1 (multiplier 5): 100 + 5_000 * 5 / 1_000 = 125
+    assert_eq!(s.fee_forwarder.compute_tiered_refund(&5_000_u64), 125);
+}
+
+#[test]
+fn tiered_refund_high_gas_uses_third_tier() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+    configure_tiers(&s, &e);
+
+    // 20_000 gas → tier 2 (multiplier 10): 100 + 20_000 * 10 / 1_000 = 300
+    assert_eq!(s.fee_forwarder.compute_tiered_refund(&20_000_u64), 300);
+}
+
+#[test]
+fn tiered_refund_returns_zero_when_no_config() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    assert_eq!(s.fee_forwarder.compute_tiered_refund(&5_000_u64), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2000)")]
+fn set_gas_tier_config_rejects_non_manager() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let not_manager = Address::generate(&e);
+    let base_fee: i128 = 100;
+    let thresholds = vec![e, 0_u64, 1_000_u64];
+    let multipliers = vec![e, 2_u32, 5_u32];
+    s.fee_forwarder.set_gas_tier_config(&base_fee, &thresholds, &multipliers, &not_manager);
+}

@@ -46,7 +46,7 @@
 //! other authorization the account signs.
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Symbol, Val, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Val, Vec};
 use stellar_access::access_control::{grant_role_no_auth, set_admin, AccessControl};
 use stellar_fee_abstraction::{
     collect_fee_and_invoke, set_allowed_fee_token, sweep_token, FeeAbstractionApproval,
@@ -55,6 +55,29 @@ use stellar_macros::only_role;
 
 const MANAGER_ROLE: Symbol = symbol_short!("manager");
 const EXECUTOR_ROLE: Symbol = symbol_short!("executor");
+const GAS_TIER_KEY: Symbol = symbol_short!("gastier");
+
+/// Configuration for tiered relayer refund rates.
+///
+/// The refund for a given `gas_used` is:
+///   `base_fee + gas_used * multiplier / 1_000`
+///
+/// where `multiplier` is the per-mille value from `tier_multipliers` whose
+/// corresponding threshold in `tier_thresholds` is the highest one still
+/// `<= gas_used`. Both vecs must have the same length; thresholds must be
+/// provided in ascending order.
+#[contracttype]
+#[derive(Clone)]
+pub struct GasTierConfig {
+    /// Flat base component added to every refund regardless of gas consumed.
+    pub base_fee: i128,
+    /// Gas-unit thresholds (CPU instructions) at which each tier begins,
+    /// in ascending order. Must be the same length as `tier_multipliers`.
+    pub tier_thresholds: Vec<u64>,
+    /// Per-mille multipliers (divide by 1_000) applied to `gas_used` within
+    /// the matching tier. Must be the same length as `tier_thresholds`.
+    pub tier_multipliers: Vec<u32>,
+}
 
 #[contract]
 pub struct FeeForwarder;
@@ -141,6 +164,56 @@ impl FeeForwarder {
     #[only_role(operator, "manager")]
     pub fn sweep_tokens(e: &Env, token: Address, recipient: Address, operator: Address) -> i128 {
         sweep_token(e, &token, &recipient)
+    }
+
+    // ── tiered relayer refund rates ──────────────────────────────────────────
+
+    /// Stores the gas-tier configuration used by `compute_tiered_refund`.
+    /// Manager-gated.
+    ///
+    /// `tier_thresholds` and `tier_multipliers` must have the same length and
+    /// thresholds must be in ascending order. The multipliers are per-mille
+    /// values (divide by 1_000); e.g. `5` means ×0.005 per gas unit.
+    #[only_role(operator, "manager")]
+    pub fn set_gas_tier_config(
+        e: &Env,
+        base_fee: i128,
+        tier_thresholds: Vec<u64>,
+        tier_multipliers: Vec<u32>,
+        operator: Address,
+    ) {
+        let config = GasTierConfig { base_fee, tier_thresholds, tier_multipliers };
+        e.storage().instance().set(&GAS_TIER_KEY, &config);
+    }
+
+    /// Returns the current gas-tier configuration, or `None` if not yet set.
+    pub fn get_gas_tier_config(e: &Env) -> Option<GasTierConfig> {
+        e.storage().instance().get(&GAS_TIER_KEY)
+    }
+
+    /// Computes the tiered refund amount for `gas_used` CPU instructions.
+    ///
+    /// Formula: `base_fee + gas_used * multiplier / 1_000`, where
+    /// `multiplier` is taken from the highest tier whose threshold is
+    /// `<= gas_used`. Returns `0` when no configuration has been stored.
+    pub fn compute_tiered_refund(e: &Env, gas_used: u64) -> i128 {
+        let config: GasTierConfig = match e.storage().instance().get(&GAS_TIER_KEY) {
+            Some(c) => c,
+            None => return 0,
+        };
+
+        // Walk the tiers in order; keep updating the multiplier for every
+        // threshold that gas_used has crossed.
+        let mut multiplier: u32 = config.tier_multipliers.get(0).unwrap_or(0);
+        let len = config.tier_thresholds.len();
+        for i in 0..len {
+            let threshold: u64 = config.tier_thresholds.get(i).unwrap_or(u64::MAX);
+            if gas_used >= threshold {
+                multiplier = config.tier_multipliers.get(i).unwrap_or(multiplier);
+            }
+        }
+
+        config.base_fee + (gas_used as i128) * (multiplier as i128) / 1_000
     }
 }
 
