@@ -111,6 +111,11 @@ pub enum Error {
     /// (`amount * price` before scaling down). Fails closed rather than
     /// wrapping or saturating to a value that could misstate the spend.
     AmountConversionOverflow = 12,
+    /// The transfer's USD value is below `MIN_TRANSFER_USD`. Dust transfers
+    /// (worth less than $1) are rejected to prevent griefing attacks that
+    /// flood the spending history with zero-cost entries, exhausting
+    /// `MAX_HISTORY_ENTRIES` and blocking legitimate transfers.
+    DustTransferRejected = 13,
 }
 
 /// Installation parameters for the multi-token spending limit policy.
@@ -180,6 +185,14 @@ const MAX_HISTORY_ENTRIES: u32 = 1000;
 /// transfer is rejected. Fails closed: a stale price blocks spending rather
 /// than letting it through at a possibly-outdated valuation.
 const MAX_STALENESS_LEDGERS: u32 = 100;
+
+/// Minimum transfer value, in whole US dollars, that this policy will record.
+/// Transfers whose USD value (after decimal normalization and truncation) falls
+/// below this threshold are rejected with [`Error::DustTransferRejected`].
+/// This prevents a griefing attack where an adversary sends thousands of
+/// sub-$1 transfers to fill the `MAX_HISTORY_ENTRIES` ring and block
+/// legitimate transfers from being recorded.
+const MIN_TRANSFER_USD: i128 = 1;
 
 /// Approximate ledger close time, in seconds, used to convert
 /// `MAX_STALENESS_LEDGERS` into a timestamp-based staleness bound, since the
@@ -347,6 +360,8 @@ impl Policy for MultiTokenSpendingLimitPolicy {
     ///   exceed the rolling spending limit.
     /// * [`Error::HistoryCapacityExceeded`] - When the spending history has
     ///   reached `MAX_HISTORY_ENTRIES`.
+    /// * [`Error::DustTransferRejected`] - When the transfer's USD value is
+    ///   below `MIN_TRANSFER_USD` after decimal normalization.
     /// * refer to [`get_policy_data`] errors.
     fn enforce(
         e: &Env,
@@ -413,6 +428,14 @@ impl Policy for MultiTokenSpendingLimitPolicy {
             .and_then(|v| v.checked_div(data.usd_divisor))
             .and_then(|v| v.checked_div(token_divisor))
             .unwrap_or_else(|| panic_with_error!(e, Error::AmountConversionOverflow));
+
+        // Reject dust transfers — a transfer worth less than MIN_TRANSFER_USD
+        // in whole USD contributes nothing meaningful to the cap but still
+        // consumes a history slot. Blocking it here bounds storage usage
+        // under a dust-flooding attack.
+        if amount_usd < MIN_TRANSFER_USD {
+            panic_with_error!(e, Error::DustTransferRejected)
+        }
 
         // Clean up old entries outside the rolling window before checking
         // the limit, so the cached total matches the live window.

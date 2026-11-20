@@ -726,7 +726,8 @@ fn test_enforce_tracks_mixed_decimal_tokens_against_one_cap() {
 }
 
 #[test]
-fn test_enforce_sub_dollar_transfer_truncates_to_zero() {
+#[should_panic(expected = "Error(Contract, #13)")] // DustTransferRejected
+fn test_enforce_rejects_sub_dollar_transfer_as_dust() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
     let token = setup_token(&e, 7);
@@ -734,13 +735,27 @@ fn test_enforce_sub_dollar_transfer_truncates_to_zero() {
     let rule =
         install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
 
-    // 9_999_999 base units = $0.9999999. Whole-dollar accounting truncates it
-    // to $0; a sub-dollar transfer consumes none of the cap by design.
+    // 9_999_999 base units = $0.9999999. Truncates to $0 in whole-dollar
+    // accounting — below MIN_TRANSFER_USD, so rejected as dust.
     let context = transfer_context(&e, &token, 9_999_999);
     client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
+}
 
-    let data = client.get_policy_data(&rule.id, &smart_account);
-    assert_eq!(data.cached_total_spent_usd, 0);
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")] // DustTransferRejected
+fn test_enforce_rejects_dust_transfer() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 7);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    // 999_999 base units at $1.00 / 10^7 = $0.0999999 — rounds down to $0,
+    // below MIN_TRANSFER_USD. Must be rejected as dust rather than silently
+    // consuming a history slot with zero spending recorded.
+    let context = transfer_context(&e, &token, 999_999);
+    client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
 }
 
 #[test]
