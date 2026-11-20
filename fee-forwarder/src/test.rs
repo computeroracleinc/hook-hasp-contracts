@@ -7,10 +7,11 @@ extern crate std;
 // can't express "the user signed but the relayer didn't" (or vice versa).
 // Those tests build the authorization tree by hand with `mock_auths`,
 // mirroring OZ's own `examples/fee-forwarder-permissioned` test suite.
+use ed25519_dalek::{Signer as DalekSigner, SigningKey};
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, MockAuth, MockAuthInvoke},
-    vec, Address, Env, IntoVal, MuxedAddress, String, Symbol, TryIntoVal, Val, Vec,
+    vec, Address, Bytes, BytesN, Env, IntoVal, MuxedAddress, String, Symbol, TryIntoVal, Val, Vec,
 };
 use stellar_tokens::fungible::{Base, FungibleToken};
 
@@ -613,4 +614,207 @@ fn constructor_grants_admin_manager_and_executor_roles() {
     assert!(s.fee_forwarder.has_role(&s.manager, &Symbol::new(&e, "manager")).is_some());
     assert!(s.fee_forwarder.has_role(&s.relayer, &Symbol::new(&e, "executor")).is_some());
     assert_eq!(s.fee_forwarder.get_admin(), Some(s.admin.clone()));
+}
+
+// ── executor permit signature verification ───────────────────────────────────
+
+/// Deterministic test keypair (seed from ed25519-verifier test suite).
+fn test_signing_key() -> SigningKey {
+    let secret: [u8; 32] = [
+        157, 97, 177, 157, 239, 253, 90, 96, 186, 132, 74, 244, 146, 236, 44, 196, 68, 73, 197,
+        105, 123, 50, 105, 25, 112, 59, 172, 3, 28, 174, 127, 96,
+    ];
+    SigningKey::from_bytes(&secret)
+}
+
+/// Builds a valid [`ExecutorPermit`] signed by `signing_key` for `executor`
+/// with the given `nonce` and `expiration_ledger`, matching the on-chain
+/// payload construction in `FeeForwarder::permit_payload`.
+fn build_permit(
+    e: &Env,
+    signing_key: &SigningKey,
+    executor: Address,
+    nonce: u64,
+    expiration_ledger: u32,
+) -> super::ExecutorPermit {
+    use soroban_sdk::xdr::ToXdr;
+
+    // Replicate the on-chain payload: domain_tag ‖ executor_xdr ‖ nonce_be8 ‖ expiry_be4.
+    let domain_tag = b"FeeForwarder:ExecutorPermit:v1\x00\x00";
+    let executor_xdr = executor.clone().to_xdr(e);
+
+    let mut payload = std::vec![];
+    payload.extend_from_slice(domain_tag);
+    for i in 0..executor_xdr.len() {
+        payload.push(executor_xdr.get(i).unwrap());
+    }
+    payload.extend_from_slice(&nonce.to_be_bytes());
+    payload.extend_from_slice(&expiration_ledger.to_be_bytes());
+
+    // sha256 of the payload (matches on-chain `e.crypto().sha256(&payload)`).
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(&payload);
+
+    let sig_bytes = signing_key.sign(&hash).to_bytes();
+    let pubkey_bytes = *signing_key.verifying_key().as_bytes();
+
+    super::ExecutorPermit {
+        signer_pubkey: BytesN::from_array(e, &pubkey_bytes),
+        signature: BytesN::from_array(e, &sig_bytes),
+        executor,
+        nonce,
+        expiration_ledger,
+    }
+}
+
+#[test]
+fn forward_with_permit_valid_permit_accepted() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let signing_key = test_signing_key();
+    let current_ledger = e.ledger().sequence();
+    let permit = build_permit(&e, &signing_key, s.relayer.clone(), 1, current_ledger + 100);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+
+    let res: String = s
+        .fee_forwarder
+        .forward_with_permit(
+            &permit,
+            &s.token.address,
+            &s.fee_amount,
+            &s.max_fee_amount,
+            &current_ledger,
+            &s.target.address,
+            &fn_name,
+            &fn_args,
+            &s.user,
+        )
+        .try_into_val(&e)
+        .unwrap();
+
+    assert_eq!(res, String::from_str(&e, "hello"));
+}
+
+#[test]
+fn is_nonce_used_false_before_use() {
+    let e = Env::default();
+    let s = setup(&e);
+    let signing_key = test_signing_key();
+    let pubkey = BytesN::from_array(&e, signing_key.verifying_key().as_bytes());
+    assert!(!s.fee_forwarder.is_nonce_used(&pubkey, &1_u64));
+}
+
+#[test]
+fn is_nonce_used_true_after_use() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let signing_key = test_signing_key();
+    let current_ledger = e.ledger().sequence();
+    let permit = build_permit(&e, &signing_key, s.relayer.clone(), 42, current_ledger + 100);
+    let pubkey = permit.signer_pubkey.clone();
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+
+    s.fee_forwarder.forward_with_permit(
+        &permit,
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+    );
+
+    assert!(s.fee_forwarder.is_nonce_used(&pubkey, &42_u64));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn forward_with_permit_rejects_replayed_nonce() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let signing_key = test_signing_key();
+    let current_ledger = e.ledger().sequence();
+    let permit = build_permit(&e, &signing_key, s.relayer.clone(), 7, current_ledger + 100);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+
+    // First use succeeds.
+    s.fee_forwarder.forward_with_permit(
+        &permit,
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+    );
+
+    // Rebuild the same permit (same nonce) — replay must be rejected.
+    let permit2 = build_permit(&e, &signing_key, s.relayer.clone(), 7, current_ledger + 100);
+    s.fee_forwarder.forward_with_permit(
+        &permit2,
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn forward_with_permit_rejects_expired_permit() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let signing_key = test_signing_key();
+    // Expiry is in the past relative to the current ledger (sequence starts at 0).
+    let current_ledger = e.ledger().sequence();
+    // Advance ledger beyond the expiry.
+    e.ledger().set_sequence_number(current_ledger + 10);
+
+    let permit = build_permit(
+        &e,
+        &signing_key,
+        s.relayer.clone(),
+        99,
+        current_ledger + 5, // expiry < current after advance
+    );
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+
+    s.fee_forwarder.forward_with_permit(
+        &permit,
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &(current_ledger + 10),
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+    );
 }
