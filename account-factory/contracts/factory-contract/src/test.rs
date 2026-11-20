@@ -40,6 +40,15 @@ struct FactorySetup<'a> {
 }
 
 fn install_factory(env: &Env) -> FactorySetup<'_> {
+    install_factory_with_tokens(env, Vec::new(env))
+}
+
+/// Like [`install_factory`], but lets a test supply the factory's approved
+/// default-token set instead of an empty one.
+fn install_factory_with_tokens(
+    env: &Env,
+    approved_default_tokens: Vec<Address>,
+) -> FactorySetup<'_> {
     let account_hash = env.deployer().upload_contract_wasm(dummy_account::WASM);
 
     let ed25519_verifier = env.register(dummy_singleton::WASM, ());
@@ -53,6 +62,7 @@ fn install_factory(env: &Env) -> FactorySetup<'_> {
             ed25519_verifier.clone(),
             webauthn_verifier.clone(),
             threshold_policy.clone(),
+            approved_default_tokens,
         ),
     );
 
@@ -70,8 +80,10 @@ fn install_factory_stub(env: &Env) -> ContractClient<'_> {
     let zero_hash = BytesN::from_array(env, &[0; 32]);
     let singleton = env.register(dummy_singleton::WASM, ());
 
-    let contract_id =
-        env.register(Contract, (zero_hash, singleton.clone(), singleton.clone(), singleton));
+    let contract_id = env.register(
+        Contract,
+        (zero_hash, singleton.clone(), singleton.clone(), singleton, Vec::<Address>::new(env)),
+    );
 
     ContractClient::new(env, &contract_id)
 }
@@ -131,7 +143,10 @@ fn constructor_rejects_undeployed_singletons() {
     // constructor-level failures cannot be caught with try_* client methods
     // because no client exists until registration succeeds.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        env.register(Contract, (zero_hash, fake.clone(), fake.clone(), fake.clone()));
+        env.register(
+            Contract,
+            (zero_hash, fake.clone(), fake.clone(), fake.clone(), Vec::<Address>::new(&env)),
+        );
     }));
 
     assert!(result.is_err());
@@ -529,4 +544,115 @@ fn create_account_with_delegated_and_external_multisig() {
 
     assert_eq!(expected, actual);
     assert!(actual.executable().is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Approved default-token whitelist (#60)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn constructor_rejects_undeployed_approved_token() {
+    let env = Env::default();
+    let account_hash = env.deployer().upload_contract_wasm(dummy_account::WASM);
+    let singleton = env.register(dummy_singleton::WASM, ());
+    // A generated (non-contract) address smuggled into the approved set.
+    let bogus_token = Address::generate(&env);
+
+    // The three singletons are real deployed contracts, so the rejection must
+    // come specifically from the bogus approved token — "unapproved token
+    // configuration rejected during factory deploy".
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        env.register(
+            Contract,
+            (
+                account_hash,
+                singleton.clone(),
+                singleton.clone(),
+                singleton,
+                soroban_sdk::vec![&env, bogus_token],
+            ),
+        );
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn get_approved_default_tokens_returns_stored_set() {
+    let env = Env::default();
+    let token_a = env.register(dummy_singleton::WASM, ());
+    let token_b = env.register(dummy_singleton::WASM, ());
+
+    let setup = install_factory_with_tokens(
+        &env,
+        soroban_sdk::vec![&env, token_a.clone(), token_b.clone()],
+    );
+
+    assert_eq!(
+        setup.client.get_approved_default_tokens(),
+        soroban_sdk::vec![&env, token_a, token_b]
+    );
+}
+
+#[test]
+fn create_account_with_tokens_rejects_unapproved() {
+    let env = Env::default();
+    // Factory deployed with an empty approved set, so every token is unapproved.
+    let setup = install_factory(&env);
+    let token = env.register(dummy_singleton::WASM, ());
+
+    let params = AccountInitParams {
+        signers: soroban_sdk::vec![&env, ext_ed25519_signer(&env, 1)],
+        threshold: None,
+        account_salt: BytesN::from_array(&env, &[20; 32]),
+    };
+
+    assert!(setup
+        .client
+        .try_create_account_with_tokens(&params, &soroban_sdk::vec![&env, token])
+        .is_err());
+}
+
+#[test]
+fn create_account_with_tokens_accepts_approved() {
+    let env = Env::default();
+    let approved_token = env.register(dummy_singleton::WASM, ());
+    let setup = install_factory_with_tokens(&env, soroban_sdk::vec![&env, approved_token.clone()]);
+
+    let params = AccountInitParams {
+        signers: soroban_sdk::vec![&env, ext_ed25519_signer(&env, 2)],
+        threshold: None,
+        account_salt: BytesN::from_array(&env, &[21; 32]),
+    };
+
+    let expected = setup.client.get_account_address(&params);
+    let actual =
+        setup.client.create_account_with_tokens(&params, &soroban_sdk::vec![&env, approved_token]);
+
+    assert_eq!(expected, actual);
+    assert!(actual.executable().is_some());
+}
+
+#[test]
+fn create_account_with_tokens_rejects_unapproved_among_approved() {
+    let env = Env::default();
+    let approved_token = env.register(dummy_singleton::WASM, ());
+    let unapproved_token = env.register(dummy_singleton::WASM, ());
+    let setup = install_factory_with_tokens(&env, soroban_sdk::vec![&env, approved_token.clone()]);
+
+    let params = AccountInitParams {
+        signers: soroban_sdk::vec![&env, ext_ed25519_signer(&env, 3)],
+        threshold: None,
+        account_salt: BytesN::from_array(&env, &[22; 32]),
+    };
+
+    // One approved token plus one unapproved token — the request must be
+    // rejected wholesale, not partially accepted.
+    assert!(setup
+        .client
+        .try_create_account_with_tokens(
+            &params,
+            &soroban_sdk::vec![&env, approved_token, unapproved_token]
+        )
+        .is_err());
 }
