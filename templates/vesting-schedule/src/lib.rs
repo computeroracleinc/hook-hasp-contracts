@@ -20,9 +20,32 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
-    Env,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    symbol_short, Address, Env, InvokeError, Val,
 };
+
+// ── Safe-transfer helper ──────────────────────────────────────────────────────
+//
+// `soroban_sdk::token::Client::transfer` panics if the callee returns a type
+// the SDK cannot decode — tokens that return `void` or a non-standard status
+// (Ethereum-style or legacy Stellar contracts) trigger this. `safe_transfer`
+// uses `try_invoke_contract` with the universal `Val` return type so any
+// well-formed return shape is accepted silently, and only an explicit contract
+// error or host abort surfaces as `VestingScheduleError::TokenTransferFailed`.
+
+fn safe_transfer(e: &Env, token: &Address, from: &Address, to: &Address, amount: &i128) {
+    use soroban_sdk::IntoVal;
+    let args = soroban_sdk::vec![e, from.into_val(e), to.into_val(e), (*amount).into_val(e)];
+    let result = e.try_invoke_contract::<Val, InvokeError>(
+        token,
+        &symbol_short!("transfer"),
+        args,
+    );
+    match result {
+        Ok(_) => {}
+        Err(_) => panic_with_error!(e, VestingScheduleError::TokenTransferFailed),
+    }
+}
 
 // ################## CONSTANTS ##################
 
@@ -78,6 +101,10 @@ pub enum VestingScheduleError {
     InvalidCliffLedger = 4,
     /// The vesting contract has not been initialized.
     NotInitialized = 5,
+    /// A token transfer failed — the token contract returned an error or a
+    /// return value shape the host could not interpret (e.g. void or a
+    /// non-standard status from a legacy or custom token contract).
+    TokenTransferFailed = 6,
 }
 
 // ################## EVENTS ##################
@@ -256,7 +283,9 @@ impl VestingScheduleContract {
 
             e.storage().instance().set(&DataKey::Schedule, &schedule);
 
-            soroban_sdk::token::Client::new(&e, &schedule.token).transfer(
+            safe_transfer(
+                &e,
+                &schedule.token,
                 &e.current_contract_address(),
                 &to,
                 &claimable,

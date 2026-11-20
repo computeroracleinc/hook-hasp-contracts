@@ -56,9 +56,47 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
-    Address, Env,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    symbol_short, token, Address, Env, InvokeError, Val,
 };
+
+// ────────────────────────────────────────────────────────────────────────────
+// Safe-transfer helper
+// ────────────────────────────────────────────────────────────────────────────
+//
+// The Soroban SDK's `token::TokenClient::transfer` panics when the callee
+// returns a type the SDK doesn't recognize — this includes tokens that return
+// `void` (the Ethereum convention) rather than a `bool`, or legacy contracts
+// that return a non-standard status value.
+//
+// `safe_transfer` avoids that panic by using `try_invoke_contract`, which
+// routes the cross-contract call through the host's error-handling layer.
+// The return value is decoded as `Val` (the host's universal value type)
+// rather than a specific Rust type, so any return shape — `void`, `bool`,
+// integer — succeeds without panicking. Only a *contract error* (the callee
+// explicitly panicked) or a host *abort* causes this call to propagate an
+// error, which we surface as `TokenTransferFailed`.
+//
+// Using `try_invoke_contract` with the standard `transfer` symbol is
+// equivalent to calling `token::TokenClient::transfer` for well-behaved
+// tokens and silently ignores unexpected-but-harmless non-void return shapes.
+
+/// Performs a token `transfer(from, to, amount)` via `try_invoke_contract`,
+/// so the vault does not panic on tokens that return `void`, `bool`, or any
+/// other non-standard value.
+fn safe_transfer(e: &Env, token: &Address, from: &Address, to: &Address, amount: &i128) {
+    use soroban_sdk::IntoVal;
+    let args = soroban_sdk::vec![e, from.into_val(e), to.into_val(e), (*amount).into_val(e)];
+    let result = e.try_invoke_contract::<Val, InvokeError>(
+        token,
+        &symbol_short!("transfer"),
+        args,
+    );
+    match result {
+        Ok(_) => {}
+        Err(_) => panic_with_error!(e, VaultError::TokenTransferFailed),
+    }
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -85,6 +123,10 @@ pub enum VaultError {
     StillLocked = 1,
     /// The constructor received an `unlock_ledger` that is not in the future.
     InvalidUnlockLedger = 2,
+    /// A token transfer failed — the token contract returned an error or
+    /// behaved in a way the vault cannot interpret (e.g. a non-standard
+    /// return value that the host rejected).
+    TokenTransferFailed = 3,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -216,7 +258,7 @@ impl TimelockVault {
         from.require_auth();
 
         let vault_addr = e.current_contract_address();
-        token::TokenClient::new(&e, &token).transfer(&from, &vault_addr, &amount);
+        safe_transfer(&e, &token, &from, &vault_addr, &amount);
 
         // Any deposit also keeps the vault's state alive, so an
         // actively-funded long-lock vault needs no separate `bump_ttl`.
@@ -254,7 +296,7 @@ impl TimelockVault {
 
         // ── Transfer ──
         let vault_addr = e.current_contract_address();
-        token::TokenClient::new(&e, &token).transfer(&vault_addr, &to, &amount);
+        safe_transfer(&e, &token, &vault_addr, &to, &amount);
 
         // Bump TTLs so the vault stays alive for future withdrawals.
         extend_state_ttl(&e);
