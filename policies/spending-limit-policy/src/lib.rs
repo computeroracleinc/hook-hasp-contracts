@@ -96,4 +96,28 @@ impl SpendingLimitPolicy {
     ) {
         spending_limit::set_spending_limit(&e, spending_limit, &context_rule, &smart_account)
     }
+
+    /// Simulates whether a transfer of `amount` (in stroops) would pass the
+    /// rolling-window spending limit without mutating any state.
+    ///
+    /// Returns `(would_pass, remaining_capacity)`:
+    /// - `would_pass` is `true` when `amount` fits within the remaining window
+    ///   allowance.
+    /// - `remaining_capacity` is `spending_limit - cached_total_spent`, clamped
+    ///   to `0`. Entries outside the rolling window are not evicted here (that
+    ///   only happens during `enforce`), so the remaining capacity may be
+    ///   slightly conservative immediately after old entries would have aged out.
+    ///
+    /// Panics with the upstream `NotInstalled` error when the policy has not
+    /// been installed for the given smart account and context rule.
+    pub fn check_policy(
+        e: &Env,
+        context_rule_id: u32,
+        smart_account: Address,
+        amount: i128,
+    ) -> (bool, i128) {
+        let data = spending_limit::get_spending_limit_data(e, context_rule_id, &smart_account);
+        let remaining = (data.spending_limit - data.cached_total_spent).max(0);
+        (amount <= remaining, remaining)
+    }
 }

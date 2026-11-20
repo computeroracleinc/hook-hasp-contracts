@@ -326,3 +326,85 @@ fn get_allowed_fns_returns_installed_value() {
         assert_eq!(allowed_fns, vec![&e, symbol_short!("set"), symbol_short!("get")]);
     });
 }
+
+#[test]
+fn check_policy_returns_true_for_allowed_fn() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams { allowed_fns: vec![&e, symbol_short!("set")] };
+        install(&e, &params, &context_rule, &smart_account);
+    });
+
+    e.as_contract(&address, || {
+        let (would_pass, fn_allowed) =
+            check_policy(&e, context_rule.id, &smart_account, &symbol_short!("set"));
+        assert!(would_pass);
+        assert!(fn_allowed);
+    });
+}
+
+#[test]
+fn check_policy_returns_false_for_not_installed() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.as_contract(&address, || {
+        // Policy not installed — must return (false, false) without panicking.
+        let (would_pass, fn_allowed) =
+            check_policy(&e, context_rule.id, &smart_account, &symbol_short!("set"));
+        assert!(!would_pass);
+        assert!(!fn_allowed);
+    });
+}
+
+#[test]
+fn check_policy_returns_false_for_disallowed_fn() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams { allowed_fns: vec![&e, symbol_short!("set")] };
+        install(&e, &params, &context_rule, &smart_account);
+    });
+
+    e.as_contract(&address, || {
+        let (would_pass, fn_allowed) =
+            check_policy(&e, context_rule.id, &smart_account, &symbol_short!("delete"));
+        assert!(!would_pass);
+        assert!(!fn_allowed);
+    });
+}
+
+#[test]
+fn check_policy_does_not_mutate_state() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams { allowed_fns: vec![&e, symbol_short!("set")] };
+        install(&e, &params, &context_rule, &smart_account);
+    });
+
+    e.as_contract(&address, || {
+        // Calling check_policy twice must yield identical results.
+        let result_a = check_policy(&e, context_rule.id, &smart_account, &symbol_short!("set"));
+        let result_b = check_policy(&e, context_rule.id, &smart_account, &symbol_short!("set"));
+        assert_eq!(result_a, result_b);
+    });
+}

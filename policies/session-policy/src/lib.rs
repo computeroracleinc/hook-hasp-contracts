@@ -45,6 +45,23 @@ impl SessionPolicy {
     pub fn get_allowed_fns(e: &Env, context_rule_id: u32, smart_account: Address) -> Vec<Symbol> {
         allowlist::get_allowed_fns(e, context_rule_id, &smart_account)
     }
+
+    /// Simulates policy enforcement without mutating state.
+    ///
+    /// Returns `(would_pass, fn_allowed)`:
+    /// - `would_pass` / `fn_allowed` are both `true` when `fn_name` is in the
+    ///   installed allowlist.
+    /// - Both are `false` when the policy is not installed, rather than
+    ///   panicking, so clients can safely call this as a preflight check
+    ///   without catching contract errors.
+    pub fn check_policy(
+        e: &Env,
+        context_rule_id: u32,
+        smart_account: Address,
+        fn_name: Symbol,
+    ) -> (bool, bool) {
+        allowlist::check_policy(e, context_rule_id, &smart_account, &fn_name)
+    }
 }
 
 #[cfg(test)]

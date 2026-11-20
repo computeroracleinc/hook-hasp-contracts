@@ -107,6 +107,26 @@ pub const MAX_ALLOWED_FNS: u32 = 10;
 
 // ################## QUERY STATE ##################
 
+/// Simulates policy enforcement without mutating state.
+///
+/// Returns `(would_pass, fn_allowed)`:
+/// - Both are `true` when `fn_name` is in the installed allowlist.
+/// - Both are `false` when the policy is not installed, so clients can call
+///   this as a preflight check without needing to catch a contract error.
+pub fn check_policy(
+    e: &Env,
+    context_rule_id: u32,
+    smart_account: &Address,
+    fn_name: &Symbol,
+) -> (bool, bool) {
+    let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule_id);
+    let Some(data) = e.storage().persistent().get::<_, SessionData>(&key) else {
+        return (false, false);
+    };
+    let allowed = data.allowed_fns.contains(fn_name);
+    (allowed, allowed)
+}
+
 /// Retrieves the allowlist for a smart account's session policy.
 ///
 /// # Arguments
