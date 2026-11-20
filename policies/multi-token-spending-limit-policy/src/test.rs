@@ -766,3 +766,122 @@ fn test_get_policy_data_rejects_not_installed() {
     let (_e, smart_account, client) = setup_env();
     client.get_policy_data(&1, &smart_account);
 }
+
+// ################## SEP-0041 COMPLIANCE ##################
+
+/// Verify that the mock token used in tests exposes the SEP-0041 `decimals`
+/// entrypoint correctly, and that the policy queries it correctly at install
+/// time.
+#[test]
+fn test_sep41_decimals_queried_at_install() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    // SEP-0041 specifies tokens must expose `decimals() -> u32`.
+    // We verify the policy correctly queries and caches this value.
+    let token_7 = setup_token(&e, 7); // typical Stellar token (e.g. USDC)
+    let token_0 = setup_token(&e, 0); // integer token
+
+    let rule = install_policy(
+        &e,
+        &client,
+        &smart_account,
+        &oracle,
+        vec![&e, token_7.clone(), token_0.clone()],
+        10_000,
+        100,
+    );
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    // token_7: 10^7 = 10_000_000
+    assert_eq!(data.token_divisors.get(0).unwrap(), 10_000_000i128);
+    // token_0: 10^0 = 1
+    assert_eq!(data.token_divisors.get(1).unwrap(), 1i128);
+}
+
+/// SEP-0041 `transfer(from, to, amount)` — verify the policy correctly
+/// parses the standard three-argument transfer shape.
+#[test]
+fn test_sep41_transfer_function_signature_accepted() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 0);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    // Standard SEP-0041 transfer(from, to, amount) — amount at index 2.
+    let context = transfer_context(&e, &token, 100);
+    client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    assert_eq!(data.cached_total_spent_usd, 100);
+}
+
+/// SEP-0041 specifies `transfer` with `amount: i128`. Verify non-transfer
+/// function names are rejected — the policy must not intercept non-transfer
+/// SEP-0041 calls like `approve`, `burn`, `mint`, etc.
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")] // InvalidTransferArgs
+fn test_sep41_non_transfer_calls_rejected() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 0);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    // `approve` is a standard SEP-0041 function but must not be intercepted
+    // as a spending event — the policy only tracks `transfer`.
+    let from = Address::generate(&e);
+    let spender = Address::generate(&e);
+    let args: Vec<Val> = vec![
+        &e,
+        from.into_val(&e),
+        spender.into_val(&e),
+        100i128.into_val(&e),
+        200u32.into_val(&e),
+    ];
+    let context = Context::Contract(ContractContext {
+        contract: token,
+        fn_name: Symbol::new(&e, "approve"),
+        args,
+    });
+
+    client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
+}
+
+/// SEP-0041 specifies `transfer` amount as `i128`. Verify the policy
+/// correctly handles the maximum boundary of the SEP-0041 amount range
+/// without silent truncation. A transfer of `i128::MAX` with a non-trivial
+/// price must overflow deterministically.
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")] // AmountConversionOverflow
+fn test_sep41_amount_i128_max_overflows_deterministically() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 0);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    // i128::MAX * ONE_USD overflows — must fail closed, not wrap.
+    let context = transfer_context(&e, &token, i128::MAX);
+    client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
+}
+
+/// SEP-0041 `decimals` values: verify the policy accepts the full range of
+/// valid decimal configurations (0 through MAX_TOKEN_DECIMALS = 20).
+#[test]
+fn test_sep41_max_valid_token_decimals_accepted() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    // 20 is the maximum allowed decimals (MAX_TOKEN_DECIMALS).
+    let token = setup_token(&e, 20);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    // 10^20 = 100_000_000_000_000_000_000
+    assert_eq!(data.token_divisors.get(0).unwrap(), 100_000_000_000_000_000_000i128);
+}
