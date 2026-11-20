@@ -111,6 +111,14 @@ pub enum Error {
     /// (`amount * price` before scaling down). Fails closed rather than
     /// wrapping or saturating to a value that could misstate the spend.
     AmountConversionOverflow = 12,
+    /// Adding the new transfer's USD value to the running total, or summing
+    /// evicted entries, overflowed `i128`. Fails closed rather than
+    /// silently saturating to a capped value that could understate the spend.
+    SpendingTotalOverflow = 13,
+    /// Multiplying `MAX_STALENESS_LEDGERS * LEDGER_CLOSE_TIME_SECS` overflowed
+    /// `u64`. Fails closed rather than wrapping or saturating to a bound that
+    /// could accept stale prices.
+    StalenessBoundOverflow = 14,
 }
 
 /// Installation parameters for the multi-token spending limit policy.
@@ -213,7 +221,13 @@ fn get_policy_data(e: &Env, context_rule_id: u32, smart_account: &Address) -> Po
 /// Evicts spending entries older than the rolling window and returns the
 /// total USD amount removed, so the caller can keep `cached_total_spent_usd`
 /// in sync without re-summing the whole history.
+///
+/// Uses `checked_add` so an improbably large history (entries summing past
+/// `i128::MAX`) fails closed with [`Error::SpendingTotalOverflow`] rather
+/// than saturating to a capped total that could leave the cache inconsistent
+/// with the actual sum.
 fn cleanup_old_entries(
+    e: &Env,
     spending_history: &mut Vec<SpendingEntry>,
     current_ledger: u32,
     period_ledgers: u32,
@@ -225,7 +239,9 @@ fn cleanup_old_entries(
     // are always at the front.
     while let Some(entry) = spending_history.get(0) {
         if entry.ledger <= cutoff_ledger {
-            removed_total = removed_total.saturating_add(entry.amount_usd);
+            removed_total = removed_total
+                .checked_add(entry.amount_usd)
+                .unwrap_or_else(|| panic_with_error!(e, Error::SpendingTotalOverflow));
             spending_history.pop_front();
         } else {
             break;
@@ -398,7 +414,9 @@ impl Policy for MultiTokenSpendingLimitPolicy {
         let current_timestamp = e.ledger().timestamp();
         let current_ledger = e.ledger().sequence();
 
-        let max_staleness_secs = MAX_STALENESS_LEDGERS as u64 * LEDGER_CLOSE_TIME_SECS;
+        let max_staleness_secs = (MAX_STALENESS_LEDGERS as u64)
+            .checked_mul(LEDGER_CLOSE_TIME_SECS)
+            .unwrap_or_else(|| panic_with_error!(e, Error::StalenessBoundOverflow));
         if current_timestamp.saturating_sub(price_data.timestamp) > max_staleness_secs {
             panic_with_error!(e, Error::StaleOraclePrice)
         }
@@ -417,10 +435,16 @@ impl Policy for MultiTokenSpendingLimitPolicy {
         // Clean up old entries outside the rolling window before checking
         // the limit, so the cached total matches the live window.
         let removed_amount =
-            cleanup_old_entries(&mut data.spending_history, current_ledger, data.period_ledgers);
-        data.cached_total_spent_usd = data.cached_total_spent_usd.saturating_sub(removed_amount);
+            cleanup_old_entries(e, &mut data.spending_history, current_ledger, data.period_ledgers);
+        data.cached_total_spent_usd = data.cached_total_spent_usd
+            .checked_sub(removed_amount)
+            .unwrap_or_else(|| panic_with_error!(e, Error::SpendingTotalOverflow));
 
-        if data.cached_total_spent_usd.saturating_add(amount_usd) > data.spending_limit_usd {
+        if data.cached_total_spent_usd
+            .checked_add(amount_usd)
+            .unwrap_or_else(|| panic_with_error!(e, Error::SpendingTotalOverflow))
+            > data.spending_limit_usd
+        {
             panic_with_error!(e, Error::SpendingLimitExceeded)
         }
 
@@ -429,7 +453,9 @@ impl Policy for MultiTokenSpendingLimitPolicy {
         }
 
         data.spending_history.push_back(SpendingEntry { amount_usd, ledger: current_ledger });
-        data.cached_total_spent_usd = data.cached_total_spent_usd.saturating_add(amount_usd);
+        data.cached_total_spent_usd = data.cached_total_spent_usd
+            .checked_add(amount_usd)
+            .unwrap_or_else(|| panic_with_error!(e, Error::SpendingTotalOverflow));
 
         let key = DataKey::AccountContext(smart_account, context_rule.id);
         e.storage().persistent().set(&key, &data);
