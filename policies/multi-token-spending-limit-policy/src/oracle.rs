@@ -61,9 +61,36 @@ pub fn fetch_usd_divisor(e: &Env, oracle_address: &Address) -> i128 {
         .unwrap_or_else(|| panic_with_error!(e, Error::InvalidOracleResponse))
 }
 
-/// Queries a token contract's `decimals()` and converts it into the base-10
-/// divisor `10.pow(decimals)` used to turn a raw `transfer` amount (in the
-/// token's own smallest unit) into a whole-token count during USD accounting.
+/// Verifies that `token` implements the standard SEP-41 token interface by
+/// probing its `balance` entrypoint. `balance` is a read-only view function
+/// common to every compliant SEP-41 / SAC token contract, so a successful
+/// call (regardless of the returned value) confirms the address is a real
+/// token contract and not a phantom address that only fakes `transfer`.
+///
+/// A bogus contract that lacks `balance`, or a non-contract address, will
+/// cause the cross-contract call to revert, which we surface as
+/// [`Error::InvalidTokenResponse`]. This check runs once per token at
+/// `install` time — if the interface is present at install it will be present
+/// at `enforce` time (token contracts are immutable once deployed).
+///
+/// We use `try_invoke_contract` with an `i128` return type (the SEP-41
+/// balance type) rather than `TokenClient::balance` so we don't panic on a
+/// contract that has `balance` but returns a differently-typed value; any
+/// successful return is accepted.
+pub fn verify_token_interface(e: &Env, token: &Address) {
+    use soroban_sdk::IntoVal;
+    // Probe with the policy contract's own address as the balance argument —
+    // it is a valid address and the call is harmless (just reads storage).
+    let probe_addr = e.current_contract_address();
+    let result = e.try_invoke_contract::<i128, crate::Error>(
+        token,
+        &soroban_sdk::symbol_short!("balance"),
+        soroban_sdk::vec![e, probe_addr.into_val(e)],
+    );
+    if result.is_err() {
+        panic_with_error!(e, Error::InvalidTokenResponse)
+    }
+}
 ///
 /// Called once per allowed token at `install` time — a token's decimals do
 /// not change — and the result is cached in `PolicyData::token_divisors`,

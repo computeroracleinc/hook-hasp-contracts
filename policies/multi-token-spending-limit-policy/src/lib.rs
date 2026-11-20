@@ -66,7 +66,7 @@ use stellar_accounts::{
 };
 
 mod oracle;
-use oracle::{fetch_price, fetch_token_divisor, fetch_usd_divisor};
+use oracle::{fetch_price, fetch_token_divisor, fetch_usd_divisor, verify_token_interface};
 
 /// Error codes for the multi-token spending limit policy.
 ///
@@ -291,6 +291,11 @@ impl Policy for MultiTokenSpendingLimitPolicy {
 
         let mut token_divisors = Vec::new(e);
         for token in install_params.allowed_tokens.iter() {
+            // Verify the token implements the standard SEP-41 interface before
+            // caching its decimals. A phantom address that fakes `transfer`
+            // but doesn't expose the read-only `balance` entrypoint is
+            // rejected here at install time rather than at the first enforce.
+            verify_token_interface(e, &token);
             token_divisors.push_back(fetch_token_divisor(e, &token));
         }
 
