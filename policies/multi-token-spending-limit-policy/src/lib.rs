@@ -11,12 +11,14 @@
 //! # Units and decimal normalization
 //!
 //! `spending_limit_usd` and the tracked totals in [`PolicyData`] are in
-//! **whole US dollars** (integer; sub-dollar transfers truncate toward zero).
+//! **whole US dollars** (integer). Sub-unit transfers are rounded **up** to 1
+//! to prevent zero-charge exploits where many tiny fractional transfers bypass
+//! the limit entirely due to truncation.
 //! A raw `transfer` amount arrives in the token's own smallest unit, so the
 //! USD value of a transfer is
 //!
 //! ```text
-//! amount_usd = amount * price / 10^oracle_decimals / 10^token_decimals
+//! amount_usd = ceil(amount * price / (10^oracle_decimals * 10^token_decimals))
 //! ```
 //!
 //! Both `10^oracle_decimals` (from the oracle's `decimals()`) and each token's
@@ -403,16 +405,32 @@ impl Policy for MultiTokenSpendingLimitPolicy {
             panic_with_error!(e, Error::StaleOraclePrice)
         }
 
-        // `amount` is in the token's smallest unit. Normalize to a whole-token
-        // count (`/ token_divisor`) and drop the oracle's price precision
-        // (`/ usd_divisor`) to land in whole USD. `checked_*` so a huge
-        // `amount * price` fails closed instead of saturating to a valuation
-        // that no longer reflects the transfer.
-        let amount_usd = amount
+        // `amount` is in the token's smallest unit. Compute the combined
+        // divisor (oracle precision × token precision) and apply ceiling
+        // division so every non-zero transfer costs at least 1 USD unit.
+        // Ceiling division: ceil(a / b) = (a + b - 1) / b for positive a, b.
+        // This prevents the zero-charge exploit where many tiny sub-unit
+        // transfers each truncate to $0 and bypass the cap entirely.
+        // `checked_*` throughout so a huge `amount * price` or a combined
+        // divisor that overflows i128 both fail closed.
+        let product = amount
             .checked_mul(price_data.price)
-            .and_then(|v| v.checked_div(data.usd_divisor))
-            .and_then(|v| v.checked_div(token_divisor))
             .unwrap_or_else(|| panic_with_error!(e, Error::AmountConversionOverflow));
+
+        let divisor = data
+            .usd_divisor
+            .checked_mul(token_divisor)
+            .unwrap_or_else(|| panic_with_error!(e, Error::AmountConversionOverflow));
+
+        // A zero transfer records $0; ceiling only applies to positive products.
+        let amount_usd = if product == 0 {
+            0
+        } else {
+            product
+                .checked_add(divisor - 1)
+                .and_then(|v| v.checked_div(divisor))
+                .unwrap_or_else(|| panic_with_error!(e, Error::AmountConversionOverflow))
+        };
 
         // Clean up old entries outside the rolling window before checking
         // the limit, so the cached total matches the live window.

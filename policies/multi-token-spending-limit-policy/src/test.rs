@@ -726,7 +726,7 @@ fn test_enforce_tracks_mixed_decimal_tokens_against_one_cap() {
 }
 
 #[test]
-fn test_enforce_sub_dollar_transfer_truncates_to_zero() {
+fn test_enforce_sub_unit_transfer_rounds_up_to_one() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
     let token = setup_token(&e, 7);
@@ -734,13 +734,54 @@ fn test_enforce_sub_dollar_transfer_truncates_to_zero() {
     let rule =
         install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
 
-    // 9_999_999 base units = $0.9999999. Whole-dollar accounting truncates it
-    // to $0; a sub-dollar transfer consumes none of the cap by design.
+    // 9_999_999 base units = $0.9999999 (less than $1). Ceiling division
+    // rounds this up to $1 so the transfer still costs quota, preventing
+    // zero-charge exploit via repeated sub-unit sends.
     let context = transfer_context(&e, &token, 9_999_999);
     client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
 
     let data = client.get_policy_data(&rule.id, &smart_account);
+    assert_eq!(data.cached_total_spent_usd, 1);
+}
+
+#[test]
+fn test_enforce_zero_amount_transfer_records_zero() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 7);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    // A genuinely zero-amount transfer records $0; ceiling only applies when
+    // the product (amount * price) is non-zero.
+    let context = transfer_context(&e, &token, 0);
+    client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
     assert_eq!(data.cached_total_spent_usd, 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")] // SpendingLimitExceeded
+fn test_enforce_repeated_sub_unit_transfers_exhaust_limit() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 7);
+
+    // Limit of 3 USD; each sub-unit transfer rounds up to $1.
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 3, 100);
+
+    // Three sub-unit transfers each consume $1, exhausting the $3 limit.
+    for _ in 0..3 {
+        client.enforce(&transfer_context(&e, &token, 1), &Vec::new(&e), &rule, &smart_account);
+    }
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    assert_eq!(data.cached_total_spent_usd, 3);
+
+    // Fourth sub-unit transfer exceeds the cap.
+    client.enforce(&transfer_context(&e, &token, 1), &Vec::new(&e), &rule, &smart_account);
 }
 
 #[test]
