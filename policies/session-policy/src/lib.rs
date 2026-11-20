@@ -9,6 +9,8 @@ use stellar_accounts::{
     smart_account::{ContextRule, Signer},
 };
 
+mod pruning;
+
 #[contract]
 pub struct SessionPolicy;
 
@@ -45,7 +47,22 @@ impl SessionPolicy {
     pub fn get_allowed_fns(e: &Env, context_rule_id: u32, smart_account: Address) -> Vec<Symbol> {
         allowlist::get_allowed_fns(e, context_rule_id, &smart_account)
     }
+
+    /// Removes session-policy state for context rules whose `valid_until`
+    /// ledger has passed. The smart account must authorize the cleanup.
+    ///
+    /// Returns the number of policy entries removed.
+    pub fn prune_expired_sessions(
+        e: &Env,
+        context_rules: Vec<ContextRule>,
+        smart_account: Address,
+    ) -> u32 {
+        pruning::prune_expired_sessions(e, &context_rules, &smart_account)
+    }
 }
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod pruning_test;
