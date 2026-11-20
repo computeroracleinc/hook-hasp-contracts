@@ -8,10 +8,29 @@ use stellar_accounts::{
     policies::simple_threshold::SimpleThresholdAccountParams, smart_account::Signer,
 };
 
+// ################## CONSTANTS ##################
+
+/// A ledger closes approximately every 5 seconds; 17 280 ledgers ≈ 1 day.
+const DAY_IN_LEDGERS: u32 = 17_280;
+
+/// Persistent entries are extended to this many ledgers on every write.
+/// 30 days worth of ledgers keeps deployed-account records alive well
+/// beyond any typical activity gap.
+const REGISTRY_EXTEND_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
+
+/// Only extend when the remaining TTL falls below this threshold (29 days)
+/// to avoid paying for an extension on every call when the entry is fresh.
+const REGISTRY_TTL_THRESHOLD: u32 = REGISTRY_EXTEND_AMOUNT - DAY_IN_LEDGERS;
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Config,
+    /// Persistent registry entry for a deployed account. The key is the
+    /// account address; the value is the ledger sequence at which it was
+    /// created. Stored as `Persistent` so it survives long dormancy with
+    /// TTL renewal on every `create_account` call.
+    AccountRegistry(Address),
 }
 
 #[contracttype]
@@ -125,6 +144,16 @@ impl Contract {
         let account_address = deployer.deployed_address();
 
         if account_address.executable().is_some() {
+            // Account already exists; still refresh its registry TTL so the
+            // entry does not expire while the account remains live.
+            let registry_key = DataKey::AccountRegistry(account_address.clone());
+            if env.storage().persistent().has(&registry_key) {
+                env.storage().persistent().extend_ttl(
+                    &registry_key,
+                    REGISTRY_TTL_THRESHOLD,
+                    REGISTRY_EXTEND_AMOUNT,
+                );
+            }
             return account_address;
         }
 
@@ -133,8 +162,37 @@ impl Contract {
             build_account_policies(&env, &config, &normalized.effective_threshold, signers.len());
 
         let account = deployer.deploy_v2(config.smart_account_wasm_hash, (&signers, &policies));
+
+        // Write a persistent registry entry for the newly created account.
+        // The entry records the creation ledger and is immediately extended
+        // to the full REGISTRY_EXTEND_AMOUNT so it survives long dormancy.
+        let registry_key = DataKey::AccountRegistry(account.clone());
+        env.storage().persistent().set(&registry_key, &env.ledger().sequence());
+        env.storage().persistent().extend_ttl(
+            &registry_key,
+            REGISTRY_TTL_THRESHOLD,
+            REGISTRY_EXTEND_AMOUNT,
+        );
+
         AccountCreated { account: account.clone() }.publish(&env);
         account
+    }
+
+    /// Returns the ledger sequence at which the given account was created by
+    /// this factory, or `None` if the account is unknown or its registry
+    /// entry has expired.
+    pub fn get_account_created_at(env: Env, account: Address) -> Option<u32> {
+        let registry_key = DataKey::AccountRegistry(account);
+        env.storage()
+            .persistent()
+            .get::<_, u32>(&registry_key)
+            .inspect(|_| {
+                env.storage().persistent().extend_ttl(
+                    &registry_key,
+                    REGISTRY_TTL_THRESHOLD,
+                    REGISTRY_EXTEND_AMOUNT,
+                );
+            })
     }
 
     pub fn get_verifier(env: Env, signer_kind: SignerKind) -> Address {
