@@ -105,6 +105,40 @@ pub const SESSION_TTL_THRESHOLD: u32 = SESSION_EXTEND_AMOUNT - DAY_IN_LEDGERS;
 /// Bounds the linear scan performed in `enforce` and the storage size.
 pub const MAX_ALLOWED_FNS: u32 = 10;
 
+// ################## HELPER ##################
+
+fn emit_session_enforced(
+    e: &Env,
+    smart_account: &Address,
+    context_rule_id: u32,
+    fn_name: &Symbol,
+) {
+    SessionEnforced {
+        smart_account: smart_account.clone(),
+        context_rule_id,
+        fn_name: fn_name.clone(),
+    }
+    .publish(e);
+}
+
+fn emit_session_created(
+    e: &Env,
+    smart_account: &Address,
+    context_rule_id: u32,
+    allowed_fns: &Vec<Symbol>,
+) {
+    SessionInstalled {
+        smart_account: smart_account.clone(),
+        context_rule_id,
+        allowed_fns: allowed_fns.clone(),
+    }
+    .publish(e);
+}
+
+fn emit_session_revoked(e: &Env, smart_account: &Address, context_rule_id: u32) {
+    SessionUninstalled { smart_account: smart_account.clone(), context_rule_id }.publish(e);
+}
+
 // ################## QUERY STATE ##################
 
 /// Retrieves the allowlist for a smart account's session policy.
@@ -178,12 +212,7 @@ pub fn enforce(
                 panic_with_error!(e, SessionError::MethodNotAllowed)
             }
 
-            SessionEnforced {
-                smart_account: smart_account.clone(),
-                context_rule_id: context_rule.id,
-                fn_name: fn_name.clone(),
-            }
-            .publish(e);
+            emit_session_enforced(e, smart_account, context_rule.id, fn_name);
         }
         _ => panic_with_error!(e, SessionError::MethodNotAllowed),
     }
@@ -241,12 +270,7 @@ pub fn install(
 
     e.storage().persistent().set(&key, &data);
 
-    SessionInstalled {
-        smart_account: smart_account.clone(),
-        context_rule_id: context_rule.id,
-        allowed_fns: params.allowed_fns.clone(),
-    }
-    .publish(e);
+    emit_session_created(e, smart_account, context_rule.id, &params.allowed_fns);
 }
 
 /// Uninstalls the session policy from a smart account, removing all stored
@@ -280,6 +304,5 @@ pub fn uninstall(e: &Env, context_rule: &ContextRule, smart_account: &Address) {
 
     e.storage().persistent().remove(&key);
 
-    SessionUninstalled { smart_account: smart_account.clone(), context_rule_id: context_rule.id }
-        .publish(e);
+    emit_session_revoked(e, smart_account, context_rule.id);
 }
