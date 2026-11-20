@@ -114,15 +114,19 @@ pub enum Error {
 }
 
 /// Installation parameters for the multi-token spending limit policy.
+///
+/// Fields are ordered with fixed-size scalars first to minimize Soroban XDR
+/// map-key overhead: shorter/scalar fields encode more compactly than
+/// variable-length ones.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct MultiTokenSpendingLimitAccountParams {
+    /// The rolling window size, in ledgers, over which the limit applies.
+    pub period_ledgers: u32,
     /// The maximum amount that can be spent across `allowed_tokens` within
     /// `period_ledgers`, in **whole US dollars** (integer). Transfers worth
     /// less than $1 truncate toward zero for accounting purposes.
     pub spending_limit_usd: i128,
-    /// The rolling window size, in ledgers, over which the limit applies.
-    pub period_ledgers: u32,
     /// The SEP-40 / Reflector-compatible oracle contract queried for each
     /// token's USD price. Fixed at install time.
     pub oracle_address: Address,
@@ -131,26 +135,32 @@ pub struct MultiTokenSpendingLimitAccountParams {
 }
 
 /// Individual spending entry for rolling-window tracking.
+///
+/// `ledger` (u32, 4 bytes) is placed before `amount_usd` (i128, 16 bytes) so
+/// the shorter fixed-size field encodes first in XDR, reducing map-key
+/// overhead.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpendingEntry {
-    pub amount_usd: i128,
     pub ledger: u32,
+    pub amount_usd: i128,
 }
 
 /// Internal storage structure for a single `(smart_account, context_rule)`
 /// installation.
+///
+/// Fields are ordered with fixed-size scalars first to minimize Soroban XDR
+/// encoded footprint: scalars (u32, i128) encode before variable-length
+/// fields (Address, Vec), reducing per-entry storage rent.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PolicyData {
     /// The rolling-window cap, in whole US dollars.
-    pub spending_limit_usd: i128,
     pub period_ledgers: u32,
-    pub oracle_address: Address,
-    /// `10.pow(oracle.decimals())`, queried once at install time and cached
-    /// so `enforce` doesn't need a second cross-contract call just to
-    /// convert a price into this policy's USD accounting.
     pub usd_divisor: i128,
+    pub spending_limit_usd: i128,
+    pub cached_total_spent_usd: i128,
+    pub oracle_address: Address,
     pub allowed_tokens: Vec<Address>,
     /// `10.pow(token.decimals())` for each entry in `allowed_tokens`, same
     /// order and length. Queried once per token at install time and used in
@@ -158,7 +168,6 @@ pub struct PolicyData {
     /// before pricing.
     pub token_divisors: Vec<i128>,
     pub spending_history: Vec<SpendingEntry>,
-    pub cached_total_spent_usd: i128,
 }
 
 #[contracttype]
@@ -295,14 +304,14 @@ impl Policy for MultiTokenSpendingLimitPolicy {
         }
 
         let data = PolicyData {
-            spending_limit_usd: install_params.spending_limit_usd,
             period_ledgers: install_params.period_ledgers,
-            oracle_address: install_params.oracle_address,
             usd_divisor,
+            spending_limit_usd: install_params.spending_limit_usd,
+            cached_total_spent_usd: 0,
+            oracle_address: install_params.oracle_address,
             allowed_tokens: install_params.allowed_tokens,
             token_divisors,
             spending_history: Vec::new(e),
-            cached_total_spent_usd: 0,
         };
 
         e.storage().persistent().set(&key, &data);
@@ -428,7 +437,7 @@ impl Policy for MultiTokenSpendingLimitPolicy {
             panic_with_error!(e, Error::HistoryCapacityExceeded)
         }
 
-        data.spending_history.push_back(SpendingEntry { amount_usd, ledger: current_ledger });
+        data.spending_history.push_back(SpendingEntry { ledger: current_ledger, amount_usd });
         data.cached_total_spent_usd = data.cached_total_spent_usd.saturating_add(amount_usd);
 
         let key = DataKey::AccountContext(smart_account, context_rule.id);

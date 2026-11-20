@@ -15,11 +15,15 @@ use stellar_contract_utils::upgradeable::{self as upgradeable, Upgradeable};
 /// Record of a satellite contract this account has deployed via
 /// `deploy_contract`, kept for client-side discoverability without needing
 /// an off-chain indexer.
+///
+/// `wasm_hash` (fixed 32 bytes) is placed before `address` to put the
+/// shorter-named fixed-size field first in XDR encoding, reducing serialized
+/// footprint.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeployedContract {
-    pub address: Address,
     pub wasm_hash: BytesN<32>,
+    pub address: Address,
 }
 
 #[contracttype]
@@ -133,7 +137,7 @@ impl LatchSmartAccount {
             .set(&LatchSmartAccountStorageKey::DeployedContractCount, &next_count);
 
         let key = LatchSmartAccountStorageKey::DeployedContract(index);
-        let record = DeployedContract { address: address.clone(), wasm_hash: wasm_hash.clone() };
+        let record = DeployedContract { wasm_hash: wasm_hash.clone(), address: address.clone() };
         e.storage().persistent().set(&key, &record);
         e.storage().persistent().extend_ttl(
             &key,
