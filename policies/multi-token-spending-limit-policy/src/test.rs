@@ -758,6 +758,160 @@ fn test_enforce_rejects_conversion_overflow() {
     client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
 }
 
+// ################## DECIMAL NORMALIZATION — PRECISION SUITE ##################
+
+#[test]
+fn test_enforce_normalizes_6_decimal_token() {
+    let (e, smart_account, client) = setup_env();
+    // 6-decimal token (e.g. USDC on Ethereum). Oracle at 8 decimals, $1.00.
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 6);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    // 250 whole tokens = 250 * 10^6 base units. Must record $250.
+    client.enforce(&transfer_context(&e, &token, 250 * 1_000_000), &Vec::new(&e), &rule, &smart_account);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    assert_eq!(data.cached_total_spent_usd, 250);
+}
+
+#[test]
+fn test_enforce_normalizes_8_decimal_token() {
+    let (e, smart_account, client) = setup_env();
+    // 8-decimal token (e.g. BTC-style). Oracle at 8 decimals, $1.00.
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 8);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    // 100 whole tokens = 100 * 10^8 base units. Must record $100.
+    client.enforce(&transfer_context(&e, &token, 100 * 100_000_000), &Vec::new(&e), &rule, &smart_account);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    assert_eq!(data.cached_total_spent_usd, 100);
+}
+
+#[test]
+fn test_enforce_normalizes_18_decimal_token() {
+    let (e, smart_account, client) = setup_env();
+    // 18-decimal token (e.g. ERC-20 style). Use a 0-decimal oracle with
+    // price=1 to avoid overflow in `amount * price` (10^18 * 10^8 > i128::MAX).
+    let oracle = setup_oracle_with_decimals(&e, 1i128, 0);
+    let token = setup_token(&e, 18);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    // 10 whole tokens = 10 * 10^18 base units.
+    // amount_usd = 10 * 10^18 * 1 / 1 / 10^18 = 10.
+    client.enforce(&transfer_context(&e, &token, 10 * 1_000_000_000_000_000_000i128), &Vec::new(&e), &rule, &smart_account);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    assert_eq!(data.cached_total_spent_usd, 10);
+}
+
+#[test]
+fn test_enforce_7_decimal_token_at_varied_price() {
+    let (e, smart_account, client) = setup_env();
+    // 7-decimal token at $2.00 (oracle 8-decimal, price = 2 * ONE_USD).
+    let oracle = setup_oracle(&e, 2 * ONE_USD);
+    let token = setup_token(&e, 7);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    // 100 whole tokens at $2 = $200.
+    client.enforce(&transfer_context(&e, &token, 100 * 10_000_000), &Vec::new(&e), &rule, &smart_account);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    assert_eq!(data.cached_total_spent_usd, 200);
+}
+
+#[test]
+fn test_enforce_6_decimal_vs_7_decimal_same_whole_token_count() {
+    let (e, smart_account, client) = setup_env();
+    // Both tokens priced at $1.00 (oracle 8-decimal). 1 whole token of each
+    // must each consume exactly $1 from the same shared cap.
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token_a = setup_token(&e, 6);
+    let token_b = setup_token(&e, 7);
+
+    let rule = install_policy(
+        &e,
+        &client,
+        &smart_account,
+        &oracle,
+        vec![&e, token_a.clone(), token_b.clone()],
+        1_000,
+        100,
+    );
+
+    // 1 whole 6-decimal token = 1_000_000 base units → $1
+    client.enforce(&transfer_context(&e, &token_a, 1_000_000), &Vec::new(&e), &rule, &smart_account);
+    // 1 whole 7-decimal token = 10_000_000 base units → $1
+    client.enforce(&transfer_context(&e, &token_b, 10_000_000), &Vec::new(&e), &rule, &smart_account);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    assert_eq!(data.cached_total_spent_usd, 2);
+}
+
+#[test]
+fn test_enforce_mixed_6_and_8_decimal_tokens_share_cap() {
+    let (e, smart_account, client) = setup_env();
+    // 6-decimal and 8-decimal tokens both at $1.00 sharing one cap.
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token_a = setup_token(&e, 6);
+    let token_b = setup_token(&e, 8);
+
+    let rule = install_policy(
+        &e,
+        &client,
+        &smart_account,
+        &oracle,
+        vec![&e, token_a.clone(), token_b.clone()],
+        1_000,
+        100,
+    );
+
+    // $300 via 6-decimal token, $50 via 8-decimal token = $350 total.
+    client.enforce(&transfer_context(&e, &token_a, 300 * 1_000_000), &Vec::new(&e), &rule, &smart_account);
+    client.enforce(&transfer_context(&e, &token_b, 50 * 100_000_000), &Vec::new(&e), &rule, &smart_account);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    assert_eq!(data.cached_total_spent_usd, 350);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")] // SpendingLimitExceeded
+fn test_enforce_6_decimal_cap_bites_at_realistic_scale() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 6);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    // 1,001 whole tokens at $1.00 = $1,001 > $1,000 cap.
+    client.enforce(&transfer_context(&e, &token, 1_001 * 1_000_000), &Vec::new(&e), &rule, &smart_account);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")] // SpendingLimitExceeded
+fn test_enforce_8_decimal_cap_bites_at_realistic_scale() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 8);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    // 1,001 whole tokens at $1.00 = $1,001 > $1,000 cap.
+    client.enforce(&transfer_context(&e, &token, 1_001 * 100_000_000), &Vec::new(&e), &rule, &smart_account);
+}
+
 // ################## QUERY ##################
 
 #[test]
