@@ -614,3 +614,171 @@ fn constructor_grants_admin_manager_and_executor_roles() {
     assert!(s.fee_forwarder.has_role(&s.relayer, &Symbol::new(&e, "executor")).is_some());
     assert_eq!(s.fee_forwarder.get_admin(), Some(s.admin.clone()));
 }
+
+// ── circuit breaker ──────────────────────────────────────────────────────────
+
+#[test]
+fn circuit_breaker_trips_when_budget_exceeded() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // Set budget to exactly one fee_amount — the second call should trip it.
+    s.fee_forwarder.set_emergency_budget(&s.token.address, &s.fee_amount, &s.manager);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // First call consumes the full budget.
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+
+    assert!(s.fee_forwarder.get_circuit_breaker_paused(&s.token.address));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn forward_rejects_when_circuit_breaker_tripped() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // Trip by setting budget below fee_amount so first call trips it.
+    s.fee_forwarder.set_emergency_budget(&s.token.address, &(s.fee_amount - 1), &s.manager);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // First call trips the breaker (and reverts itself).
+    let _ = s.fee_forwarder.try_forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+
+    // Second call must be rejected immediately with CircuitBreakerTripped.
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+}
+
+#[test]
+fn reset_circuit_breaker_resumes_forwarding() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // Trip the breaker.
+    s.fee_forwarder.set_emergency_budget(&s.token.address, &(s.fee_amount - 1), &s.manager);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    let _ = s.fee_forwarder.try_forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+
+    assert!(s.fee_forwarder.get_circuit_breaker_paused(&s.token.address));
+
+    // Manager resets it.
+    s.fee_forwarder.reset_circuit_breaker(&s.token.address, &s.manager);
+    assert!(!s.fee_forwarder.get_circuit_breaker_paused(&s.token.address));
+
+    // Raise the budget so the next call doesn't re-trip.
+    s.fee_forwarder.set_emergency_budget(&s.token.address, &s.max_fee_amount, &s.manager);
+
+    // Should now succeed.
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2000)")]
+fn set_emergency_budget_rejects_non_manager() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let not_manager = Address::generate(&e);
+    s.fee_forwarder.set_emergency_budget(&s.token.address, &s.fee_amount, &not_manager);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2000)")]
+fn reset_circuit_breaker_rejects_non_manager() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let not_manager = Address::generate(&e);
+    s.fee_forwarder.reset_circuit_breaker(&s.token.address, &not_manager);
+}
+
+#[test]
+fn forward_without_budget_configured_ignores_circuit_breaker() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // No budget configured — circuit breaker should stay inactive.
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+
+    assert!(!s.fee_forwarder.get_circuit_breaker_paused(&s.token.address));
+}
