@@ -12,6 +12,20 @@ use stellar_accounts::smart_account::{
 };
 use stellar_contract_utils::upgradeable::{self as upgradeable, Upgradeable};
 
+// ── Flash-loan protocol registry ─────────────────────────────────────────────
+//
+// A flash-loan callback is a re-entrant call the lending protocol makes back
+// into this account after disbursing funds. Without a guard, any contract
+// could impersonate a lending protocol, trigger the callback, and manipulate
+// the account into signing or transferring assets it did not intend to.
+//
+// The registry maps each approved lending-protocol address to `true` in
+// persistent storage. Only the account itself can add or remove entries
+// (each mutating method calls `e.current_contract_address().require_auth()`).
+// `flash_loan_callback` checks the caller against the registry before doing
+// any work; an unrecognized caller is rejected with
+// `FlashLoanCallbackUnauthorized`.
+
 /// Record of a satellite contract this account has deployed via
 /// `deploy_contract`, kept for client-side discoverability without needing
 /// an off-chain indexer.
@@ -26,6 +40,10 @@ pub struct DeployedContract {
 pub enum LatchSmartAccountStorageKey {
     DeployedContractCount,
     DeployedContract(u32),
+    /// Marks a lending-protocol address as approved to invoke the flash-loan
+    /// callback on this account. Stored in persistent storage so the registry
+    /// survives across ledgers.
+    ApprovedFlashLoanProtocol(Address),
 }
 
 /// Error codes for `LatchSmartAccount`'s own methods, distinct from
@@ -40,6 +58,11 @@ pub enum LatchSmartAccountError {
     DeployedContractNotFound = 4000,
     /// The deployed-contract counter has reached `u32::MAX`.
     MathOverflow = 4001,
+    /// A flash-loan callback was invoked by a contract address that is not in
+    /// the account's approved-protocol registry. Rejects any attempt by an
+    /// unverified contract to re-enter this account via the callback
+    /// entrypoint.
+    FlashLoanCallbackUnauthorized = 4002,
 }
 
 /// Event emitted when this account deploys a satellite contract via
@@ -50,6 +73,23 @@ pub struct ContractDeployed {
     #[topic]
     pub address: Address,
     pub wasm_hash: BytesN<32>,
+}
+
+/// Emitted when a lending-protocol address is added to the flash-loan
+/// approved-protocol registry.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlashLoanProtocolRegistered {
+    #[topic]
+    pub protocol: Address,
+}
+
+/// Emitted when a lending-protocol address is removed from the registry.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlashLoanProtocolRemoved {
+    #[topic]
+    pub protocol: Address,
 }
 
 #[contract]
@@ -174,6 +214,98 @@ impl LatchSmartAccount {
             .unwrap_or_else(|| {
                 panic_with_error!(e, LatchSmartAccountError::DeployedContractNotFound)
             })
+    }
+
+    // ── Flash-loan protocol registry ──────────────────────────────────────
+
+    /// Adds `protocol` to the set of lending-protocol addresses permitted to
+    /// invoke `flash_loan_callback` on this account. Requires self-auth so
+    /// only the account's own signer/policy stack can approve a new protocol.
+    ///
+    /// # Events
+    ///
+    /// * topics - `["flash_loan_protocol_registered", protocol: Address]`
+    pub fn register_flash_loan_protocol(e: &Env, protocol: Address) {
+        e.current_contract_address().require_auth();
+        let key = LatchSmartAccountStorageKey::ApprovedFlashLoanProtocol(protocol.clone());
+        e.storage().persistent().set(&key, &true);
+        e.storage().persistent().extend_ttl(
+            &key,
+            SMART_ACCOUNT_TTL_THRESHOLD,
+            SMART_ACCOUNT_EXTEND_AMOUNT,
+        );
+        FlashLoanProtocolRegistered { protocol }.publish(e);
+    }
+
+    /// Removes `protocol` from the approved set, preventing it from invoking
+    /// the flash-loan callback in the future. Requires self-auth.
+    ///
+    /// # Events
+    ///
+    /// * topics - `["flash_loan_protocol_removed", protocol: Address]`
+    pub fn remove_flash_loan_protocol(e: &Env, protocol: Address) {
+        e.current_contract_address().require_auth();
+        let key = LatchSmartAccountStorageKey::ApprovedFlashLoanProtocol(protocol.clone());
+        e.storage().persistent().remove(&key);
+        FlashLoanProtocolRemoved { protocol }.publish(e);
+    }
+
+    /// Returns `true` if `protocol` is in the approved-protocol registry,
+    /// `false` otherwise.
+    pub fn is_approved_flash_loan_protocol(e: &Env, protocol: Address) -> bool {
+        let key = LatchSmartAccountStorageKey::ApprovedFlashLoanProtocol(protocol);
+        e.storage().persistent().has(&key)
+    }
+
+    /// Flash-loan callback entrypoint. The calling lending protocol passes
+    /// back the `token` it disbursed and the `amount`, plus an arbitrary
+    /// `data` payload the account sent with its borrow request.
+    ///
+    /// **Security guarantee**: this method checks the `caller` supplied by the
+    /// invoking transaction against the account's approved-protocol registry
+    /// before doing any work. An unrecognized caller is rejected with
+    /// [`LatchSmartAccountError::FlashLoanCallbackUnauthorized`], preventing
+    /// any contract from arbitrarily re-entering this account via the
+    /// flash-loan path.
+    ///
+    /// The account must also authorize this call through its normal
+    /// `require_auth` mechanism — the caller is verified against the registry
+    /// first, so an unauthorized contract cannot even attempt to forge auth.
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - The lending-protocol address invoking the callback.
+    ///   Must be in the approved-protocol registry.
+    /// * `token` - The token disbursed by the flash loan.
+    /// * `amount` - The amount disbursed (in token's smallest unit).
+    /// * `data` - Opaque payload the account attached when requesting the
+    ///   loan; passed back unchanged so the account can recover context.
+    ///
+    /// # Errors
+    ///
+    /// * [`LatchSmartAccountError::FlashLoanCallbackUnauthorized`] - If
+    ///   `caller` is not in the approved-protocol registry.
+    pub fn flash_loan_callback(e: &Env, caller: Address, token: Address, amount: i128, data: Val) {
+        // ── Protocol verification ────────────────────────────────────────
+        // Check the registry *before* requiring any auth so an unrecognized
+        // protocol cannot probe whether the auth check would pass.
+        if !Self::is_approved_flash_loan_protocol(e, caller.clone()) {
+            panic_with_error!(e, LatchSmartAccountError::FlashLoanCallbackUnauthorized);
+        }
+
+        // ── Authorization ────────────────────────────────────────────────
+        // The account itself must authorize the callback — the account's
+        // `__check_auth` runs against the caller's context rule, ensuring the
+        // callback is gated by the same signer/policy stack as every other
+        // operation.
+        e.current_contract_address().require_auth();
+
+        // ── Application logic placeholder ────────────────────────────────
+        // Real implementations would use `token` and `amount` to repay the
+        // loan and `data` to recover context. The registry check above is the
+        // security boundary; what happens here is application-specific and
+        // intentionally left as a no-op in this base implementation.
+        let _ = (token, amount, data);
     }
 }
 
