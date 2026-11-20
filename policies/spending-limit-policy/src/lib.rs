@@ -94,6 +94,7 @@ impl SpendingLimitPolicy {
         context_rule: ContextRule,
         smart_account: Address,
     ) {
+        smart_account.require_auth();
         spending_limit::set_spending_limit(&e, spending_limit, &context_rule, &smart_account)
     }
 }

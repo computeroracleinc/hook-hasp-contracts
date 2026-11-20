@@ -111,6 +111,7 @@ impl WeightedThresholdPolicy {
         context_rule: ContextRule,
         smart_account: Address,
     ) {
+        smart_account.require_auth();
         weighted_threshold::set_threshold(&e, threshold, &context_rule, &smart_account)
     }
 
@@ -121,6 +122,7 @@ impl WeightedThresholdPolicy {
         context_rule: ContextRule,
         smart_account: Address,
     ) {
+        smart_account.require_auth();
         weighted_threshold::set_signer_weight(&e, &signer, weight, &context_rule, &smart_account)
     }
 }
