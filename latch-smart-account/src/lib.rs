@@ -188,6 +188,14 @@ impl CustomAccountInterface for LatchSmartAccount {
         signatures: AuthPayload,
         auth_contexts: Vec<Context>,
     ) -> Result<(), Self::Error> {
+        // Bump the contract instance TTL on every authenticated transaction so
+        // the account cannot be archived while it is actively used. The window
+        // matches the persistent-storage constants exported by stellar_accounts
+        // so all storage tiers expire on the same cadence.
+        e.storage().instance().extend_ttl(
+            SMART_ACCOUNT_TTL_THRESHOLD,
+            SMART_ACCOUNT_EXTEND_AMOUNT,
+        );
         smart_account::do_check_auth(&e, &signature_payload, &signatures, &auth_contexts)
     }
 }
