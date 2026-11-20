@@ -614,3 +614,100 @@ fn constructor_grants_admin_manager_and_executor_roles() {
     assert!(s.fee_forwarder.has_role(&s.relayer, &Symbol::new(&e, "executor")).is_some());
     assert_eq!(s.fee_forwarder.get_admin(), Some(s.admin.clone()));
 }
+
+// ── fee cap: MAX_FEE_CAP enforcement ────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn forward_rejects_fee_exceeding_cap() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // Lower the cap to below the default fee_amount used in setup.
+    s.fee_forwarder.set_fee_cap(&(s.fee_amount - 1), &s.manager);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+}
+
+#[test]
+fn forward_accepts_fee_exactly_at_cap() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // Set cap exactly equal to fee_amount — boundary should be accepted.
+    s.fee_forwarder.set_fee_cap(&s.fee_amount, &s.manager);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // Should not panic.
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+}
+
+#[test]
+fn set_fee_cap_by_manager_updates_cap() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let new_cap: i128 = 500_000;
+    s.fee_forwarder.set_fee_cap(&new_cap, &s.manager);
+    assert_eq!(s.fee_forwarder.get_fee_cap(), new_cap);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2000)")]
+fn set_fee_cap_rejects_non_manager() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let not_manager = Address::generate(&e);
+    s.fee_forwarder.set_fee_cap(&500_000, &not_manager);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn set_fee_cap_rejects_zero() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    s.fee_forwarder.set_fee_cap(&0, &s.manager);
+}
+
+#[test]
+fn constructor_sets_default_fee_cap() {
+    let e = Env::default();
+    let s = setup(&e);
+
+    use super::DEFAULT_FEE_CAP;
+    assert_eq!(s.fee_forwarder.get_fee_cap(), DEFAULT_FEE_CAP);
+}
