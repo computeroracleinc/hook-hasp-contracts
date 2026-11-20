@@ -130,7 +130,7 @@ fn withdraw_before_unlock_rejected() {
 
     // Current ledger is 100, unlock is 1000 — still locked.
     assert!(e.ledger().sequence() < UNLOCK_LEDGER);
-    client.withdraw(&token_addr, &DEPOSIT_AMOUNT, &owner);
+    client.withdraw(&token_addr, &DEPOSIT_AMOUNT, &owner, &DEPOSIT_AMOUNT);
 }
 
 #[test]
@@ -144,7 +144,7 @@ fn withdraw_after_unlock_succeeds() {
         li.sequence_number = UNLOCK_LEDGER + 1;
     });
 
-    client.withdraw(&token_addr, &DEPOSIT_AMOUNT, &owner);
+    client.withdraw(&token_addr, &DEPOSIT_AMOUNT, &owner, &DEPOSIT_AMOUNT);
 
     assert_eq!(client.get_balance(&token_addr), 0);
     // Owner received the funds back.
@@ -164,7 +164,7 @@ fn withdraw_at_exact_unlock_ledger_succeeds() {
         li.sequence_number = UNLOCK_LEDGER;
     });
 
-    client.withdraw(&token_addr, &DEPOSIT_AMOUNT, &owner);
+    client.withdraw(&token_addr, &DEPOSIT_AMOUNT, &owner, &DEPOSIT_AMOUNT);
 
     assert_eq!(client.get_balance(&token_addr), 0);
 }
@@ -189,11 +189,11 @@ fn withdraw_non_owner_rejected_before_unlock() {
             invoke: &MockAuthInvoke {
                 contract: &client.address,
                 fn_name: "withdraw",
-                args: (&token_addr, DEPOSIT_AMOUNT, &non_owner).into_val(&env),
+                args: (&token_addr, DEPOSIT_AMOUNT, &non_owner, DEPOSIT_AMOUNT).into_val(&env),
                 sub_invokes: &[],
             },
         }])
-        .withdraw(&token_addr, &DEPOSIT_AMOUNT, &non_owner);
+        .withdraw(&token_addr, &DEPOSIT_AMOUNT, &non_owner, &DEPOSIT_AMOUNT);
 }
 
 #[test]
@@ -216,11 +216,11 @@ fn withdraw_non_owner_rejected_after_unlock() {
             invoke: &MockAuthInvoke {
                 contract: &client.address,
                 fn_name: "withdraw",
-                args: (&token_addr, DEPOSIT_AMOUNT, &non_owner).into_val(&e),
+                args: (&token_addr, DEPOSIT_AMOUNT, &non_owner, DEPOSIT_AMOUNT).into_val(&e),
                 sub_invokes: &[],
             },
         }])
-        .withdraw(&token_addr, &DEPOSIT_AMOUNT, &non_owner);
+        .withdraw(&token_addr, &DEPOSIT_AMOUNT, &non_owner, &DEPOSIT_AMOUNT);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -245,8 +245,8 @@ fn works_with_multiple_tokens() {
     });
 
     // Withdraw each token separately.
-    client.withdraw(&token_a, &DEPOSIT_AMOUNT, &owner);
-    client.withdraw(&token_b, &(DEPOSIT_AMOUNT * 2), &owner);
+    client.withdraw(&token_a, &DEPOSIT_AMOUNT, &owner, &DEPOSIT_AMOUNT);
+    client.withdraw(&token_b, &(DEPOSIT_AMOUNT * 2), &owner, &(DEPOSIT_AMOUNT * 2));
 
     assert_eq!(client.get_balance(&token_a), 0);
     assert_eq!(client.get_balance(&token_b), 0);
@@ -278,7 +278,7 @@ fn withdraw_emits_event() {
         li.sequence_number = UNLOCK_LEDGER + 1;
     });
 
-    client.withdraw(&token_addr, &DEPOSIT_AMOUNT, &owner);
+    client.withdraw(&token_addr, &DEPOSIT_AMOUNT, &owner, &DEPOSIT_AMOUNT);
 
     // Filter events to only those emitted by the vault contract.
     let vault_events = e.events().all().filter_by_contract(&client.address);
@@ -304,12 +304,12 @@ fn partial_withdraw_leaves_remainder() {
     });
 
     let half = DEPOSIT_AMOUNT / 2;
-    client.withdraw(&token_addr, &half, &owner);
+    client.withdraw(&token_addr, &half, &owner, &half);
 
     assert_eq!(client.get_balance(&token_addr), DEPOSIT_AMOUNT - half);
 
     // Second withdrawal for the rest.
-    client.withdraw(&token_addr, &(DEPOSIT_AMOUNT - half), &owner);
+    client.withdraw(&token_addr, &(DEPOSIT_AMOUNT - half), &owner, &(DEPOSIT_AMOUNT - half));
     assert_eq!(client.get_balance(&token_addr), 0);
 }
 
@@ -375,7 +375,90 @@ fn bump_ttl_is_permissionless() {
 // E2E deployment via smart account (#39)
 // ────────────────────────────────────────────────────────────────────────────
 
-mod timelock_vault_wasm {
+// ────────────────────────────────────────────────────────────────────────────
+// Slippage protection tests
+// ────────────────────────────────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // SlippageExceeded
+fn withdraw_rejects_zero_min_amount_out() {
+    let (e, owner, client, token_addr, _sac) = setup_env();
+
+    client.deposit(&owner, &token_addr, &DEPOSIT_AMOUNT);
+
+    e.ledger().with_mut(|li| {
+        li.sequence_number = UNLOCK_LEDGER + 1;
+    });
+
+    // min_amount_out = 0 is not a meaningful slippage floor — must be rejected.
+    client.withdraw(&token_addr, &DEPOSIT_AMOUNT, &owner, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // SlippageExceeded
+fn withdraw_rejects_negative_min_amount_out() {
+    let (e, owner, client, token_addr, _sac) = setup_env();
+
+    client.deposit(&owner, &token_addr, &DEPOSIT_AMOUNT);
+
+    e.ledger().with_mut(|li| {
+        li.sequence_number = UNLOCK_LEDGER + 1;
+    });
+
+    client.withdraw(&token_addr, &DEPOSIT_AMOUNT, &owner, &-1);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // SlippageExceeded
+fn withdraw_rejects_amount_below_min_amount_out() {
+    let (e, owner, client, token_addr, _sac) = setup_env();
+
+    client.deposit(&owner, &token_addr, &DEPOSIT_AMOUNT);
+
+    e.ledger().with_mut(|li| {
+        li.sequence_number = UNLOCK_LEDGER + 1;
+    });
+
+    // Requesting DEPOSIT_AMOUNT but declaring a min of DEPOSIT_AMOUNT + 1 —
+    // simulates a price move that would give the caller less than expected.
+    client.withdraw(&token_addr, &DEPOSIT_AMOUNT, &owner, &(DEPOSIT_AMOUNT + 1));
+}
+
+#[test]
+fn withdraw_accepts_amount_equal_to_min_amount_out() {
+    let (e, owner, client, token_addr, _sac) = setup_env();
+
+    client.deposit(&owner, &token_addr, &DEPOSIT_AMOUNT);
+
+    e.ledger().with_mut(|li| {
+        li.sequence_number = UNLOCK_LEDGER + 1;
+    });
+
+    // amount == min_amount_out is the exact boundary — must succeed.
+    client.withdraw(&token_addr, &DEPOSIT_AMOUNT, &owner, &DEPOSIT_AMOUNT);
+    assert_eq!(client.get_balance(&token_addr), 0);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// InvalidAmount tests
+// ────────────────────────────────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")] // InvalidAmount
+fn deposit_rejects_zero_amount() {
+    let (_e, owner, client, token_addr, _sac) = setup_env();
+
+    // Zero-amount deposit must be rejected before the token transfer.
+    client.deposit(&owner, &token_addr, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")] // InvalidAmount
+fn deposit_rejects_negative_amount() {
+    let (_e, owner, client, token_addr, _sac) = setup_env();
+
+    client.deposit(&owner, &token_addr, &-1);
+}
     soroban_sdk::contractimport!(file = "testdata/timelock_vault.wasm");
 }
 
@@ -425,7 +508,7 @@ fn e2e_deploy_via_smart_account() {
     assert_eq!(vault_client.get_balance(&token_id.address()), 10_000_000);
 
     // Withdraw fails before unlock
-    let res = vault_client.try_withdraw(&token_id.address(), &10_000_000, &account_id);
+    let res = vault_client.try_withdraw(&token_id.address(), &10_000_000, &account_id, &10_000_000);
     assert!(res.is_err());
 
     // Advance past unlock
@@ -433,6 +516,6 @@ fn e2e_deploy_via_smart_account() {
         li.sequence_number = unlock_ledger + 1;
     });
 
-    vault_client.withdraw(&token_id.address(), &10_000_000, &account_id);
+    vault_client.withdraw(&token_id.address(), &10_000_000, &account_id, &10_000_000);
     assert_eq!(vault_client.get_balance(&token_id.address()), 0);
 }

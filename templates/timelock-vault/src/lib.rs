@@ -85,6 +85,11 @@ pub enum VaultError {
     StillLocked = 1,
     /// The constructor received an `unlock_ledger` that is not in the future.
     InvalidUnlockLedger = 2,
+    /// The withdrawal amount is below the caller's declared minimum
+    /// (`min_amount_out`), or `min_amount_out` itself is zero or negative.
+    SlippageExceeded = 3,
+    /// The deposit or withdrawal `amount` is zero or negative.
+    InvalidAmount = 4,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -211,8 +216,16 @@ impl TimelockVault {
     ///
     /// * `from` — the depositor. `from.require_auth()` is called.
     /// * `token` — the SEP-41 / SAC token contract address.
-    /// * `amount` — stroops (or equivalent smallest unit) to deposit.
+    /// * `amount` — stroops (or equivalent smallest unit) to deposit. Must be
+    ///   greater than zero.
+    ///
+    /// # Errors
+    ///
+    /// * [`VaultError::InvalidAmount`] — `amount` is zero or negative.
     pub fn deposit(e: Env, from: Address, token: Address, amount: i128) {
+        if amount <= 0 {
+            panic_with_error!(&e, VaultError::InvalidAmount);
+        }
         from.require_auth();
 
         let vault_addr = e.current_contract_address();
@@ -235,13 +248,28 @@ impl TimelockVault {
     /// * `token` — the SEP-41 / SAC token contract address to withdraw.
     /// * `amount` — stroops (or equivalent smallest unit) to withdraw.
     /// * `to` — recipient address.
+    /// * `min_amount_out` — the minimum amount the caller is willing to
+    ///   receive. Must be greater than zero. If `amount` is less than
+    ///   `min_amount_out`, the call is rejected with
+    ///   [`VaultError::SlippageExceeded`], protecting the caller against
+    ///   receiving less than expected from exchange operations.
     ///
     /// # Errors
     ///
+    /// * [`VaultError::SlippageExceeded`] — `min_amount_out` is zero or
+    ///   negative, or `amount` is less than `min_amount_out`.
     /// * [`VaultError::StillLocked`] — current ledger is before
     ///   `unlock_ledger`.
     /// * Panics via `require_auth` if caller is not the owner.
-    pub fn withdraw(e: Env, token: Address, amount: i128, to: Address) {
+    pub fn withdraw(e: Env, token: Address, amount: i128, to: Address, min_amount_out: i128) {
+        // ── Slippage gate ──
+        if min_amount_out <= 0 {
+            panic_with_error!(&e, VaultError::SlippageExceeded);
+        }
+        if amount < min_amount_out {
+            panic_with_error!(&e, VaultError::SlippageExceeded);
+        }
+
         // ── Owner gate ──
         let owner: Address = e.storage().persistent().get(&DataKey::Owner).unwrap();
         owner.require_auth();
