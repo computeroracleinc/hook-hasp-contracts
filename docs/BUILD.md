@@ -38,6 +38,19 @@ are re-derived from the exact tagged tree, not carried over from a branch build.
 Do not describe the binaries below as the post-fix audit candidate. This record is replaced
 in full when the `audit-v1` commit is deployed to testnet.
 
+## Singleton TTL keepalive
+
+The scheduled [singleton TTL keepalive workflow](../.github/workflows/singleton-ttl-keepalive.yml)
+extends the persistent contract-instance entries and contract code for the testnet singletons
+listed in [`deployments/ttl-targets.json`](../deployments/ttl-targets.json). It runs weekly and
+adds 30 days of TTL using Stellar CLI's `contract extend` command, which submits Soroban
+`ExtendFootprintTTL` operations through the configured RPC network.
+
+To enable the workflow, configure the repository Actions secret `STELLAR_SECRET_KEY` with a
+funded **testnet-only** signer. The workflow never stores the secret in the repository. When a
+singleton is redeployed, update its contract ID and WASM hash in `ttl-targets.json` to match this
+deployment index; do not add user-owned contract instances.
+
 ## Testnet — 2026-09-03, source commit `ace9dbd` (`audit-v1` pointed here until 2026-09-08)
 
 | Field | Value |
