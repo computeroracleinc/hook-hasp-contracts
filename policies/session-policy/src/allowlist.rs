@@ -121,18 +121,19 @@ pub const MAX_ALLOWED_FNS: u32 = 10;
 ///   not have a session policy installed.
 pub fn get_allowed_fns(e: &Env, context_rule_id: u32, smart_account: &Address) -> Vec<Symbol> {
     let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule_id);
-    e.storage()
-        .temporary()
-        .get::<_, SessionData>(&key)
-        .inspect(|_| {
-            e.storage().temporary().extend_ttl(
-                &key,
-                SESSION_TTL_THRESHOLD,
-                SESSION_EXTEND_AMOUNT,
-            );
-        })
-        .map(|data| data.allowed_fns)
-        .unwrap_or_else(|| panic_with_error!(e, SessionError::SmartAccountNotInstalled))
+    if let Some(data) = e.storage().temporary().get::<_, SessionData>(&key) {
+        e.storage().temporary().extend_ttl(&key, SESSION_TTL_THRESHOLD, SESSION_EXTEND_AMOUNT);
+        return data.allowed_fns;
+    }
+
+    if let Some(data) = e.storage().persistent().get::<_, SessionData>(&key) {
+        e.storage().persistent().remove(&key);
+        e.storage().temporary().set(&key, &data);
+        e.storage().temporary().extend_ttl(&key, SESSION_TTL_THRESHOLD, SESSION_EXTEND_AMOUNT);
+        return data.allowed_fns;
+    }
+
+    panic_with_error!(e, SessionError::SmartAccountNotInstalled)
 }
 
 // ################## CHANGE STATE ##################
@@ -237,7 +238,7 @@ pub fn install(
 
     let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
 
-    if e.storage().temporary().has(&key) {
+    if e.storage().temporary().has(&key) || e.storage().persistent().has(&key) {
         panic_with_error!(e, SessionError::AlreadyInstalled)
     }
 
@@ -279,11 +280,12 @@ pub fn uninstall(e: &Env, context_rule: &ContextRule, smart_account: &Address) {
 
     let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
 
-    if !e.storage().temporary().has(&key) {
+    if !e.storage().temporary().has(&key) && !e.storage().persistent().has(&key) {
         panic_with_error!(e, SessionError::SmartAccountNotInstalled)
     }
 
     e.storage().temporary().remove(&key);
+    e.storage().persistent().remove(&key);
 
     SessionUninstalled { smart_account: smart_account.clone(), context_rule_id: context_rule.id }
         .publish(e);

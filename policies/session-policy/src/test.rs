@@ -329,3 +329,20 @@ fn get_allowed_fns_returns_installed_value() {
         assert_eq!(allowed_fns, vec![&e, symbol_short!("set"), symbol_short!("get")]);
     });
 }
+
+#[test]
+fn get_allowed_fns_migrates_existing_persistent_state() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+    let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+    let data = SessionData { allowed_fns: vec![&e, symbol_short!("set")] };
+
+    e.as_contract(&address, || {
+        e.storage().persistent().set(&key, &data);
+        assert_eq!(get_allowed_fns(&e, context_rule.id, &smart_account), data.allowed_fns);
+        assert!(!e.storage().persistent().has(&key));
+        assert!(e.storage().temporary().has(&key));
+    });
+}
