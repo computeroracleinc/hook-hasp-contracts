@@ -15,6 +15,7 @@ use soroban_sdk::{
 use stellar_tokens::fungible::{Base, FungibleToken};
 
 use super::{FeeForwarder, FeeForwarderClient};
+use super::FeeForwarderError;
 
 #[contract]
 pub struct MockToken;
@@ -613,4 +614,123 @@ fn constructor_grants_admin_manager_and_executor_roles() {
     assert!(s.fee_forwarder.has_role(&s.manager, &Symbol::new(&e, "manager")).is_some());
     assert!(s.fee_forwarder.has_role(&s.relayer, &Symbol::new(&e, "executor")).is_some());
     assert_eq!(s.fee_forwarder.get_admin(), Some(s.admin.clone()));
+}
+
+// ── front-running mitigation (#44) ──────────────────────────────────────────
+//
+// `forward_restricted` binds the payload to a specific `authorized_executor`
+// inside the user's signed argument tuple. A third-party relayer that
+// intercepts the payload and submits it with a different executor address
+// will not satisfy the authorization check and must be rejected.
+
+/// Builds mock auth invocations for `forward_restricted`.
+fn restricted_invokes<'a>(
+    s: &'a Setup<'a>,
+    e: &'a Env,
+    fee_amount: i128,
+    fn_name: &'a Symbol,
+    fn_args: &'a Vec<Val>,
+) -> (MockAuthInvoke<'a>, MockAuthInvoke<'a>) {
+    let current_ledger = e.ledger().sequence();
+    // User signs the full tuple including authorized_executor (= relayer).
+    let user_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward_restricted",
+        args: (
+            s.token.address.clone(),
+            s.max_fee_amount,
+            current_ledger,
+            s.target.address.clone(),
+            fn_name.clone(),
+            fn_args.clone(),
+            s.relayer.clone(), // authorized_executor bound in digest
+        )
+            .into_val(e),
+        sub_invokes: &[],
+    };
+    let relayer_invoke = MockAuthInvoke {
+        contract: &s.fee_forwarder.address,
+        fn_name: "forward_restricted",
+        args: (
+            s.token.address.clone(),
+            fee_amount,
+            s.max_fee_amount,
+            current_ledger,
+            s.target.address.clone(),
+            fn_name.clone(),
+            fn_args.clone(),
+            s.user.clone(),
+            s.relayer.clone(),
+            s.relayer.clone(), // authorized_executor
+        )
+            .into_val(e),
+        sub_invokes: &[],
+    };
+    (user_invoke, relayer_invoke)
+}
+
+#[test]
+fn forward_restricted_succeeds_for_authorized_executor() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    let (user_invoke, relayer_invoke) =
+        restricted_invokes(&s, &e, s.fee_amount, &fn_name, &fn_args);
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke },
+    ];
+
+    let initial_user_balance = s.token.balance(&s.user);
+
+    s.fee_forwarder.mock_auths(&auths).forward_restricted(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+        &s.relayer, // authorized_executor matches relayer
+    );
+
+    assert_eq!(s.token.balance(&s.user), initial_user_balance - s.fee_amount);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8001)")]
+fn forward_restricted_rejects_third_party_relayer_frontrun() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // A second executor enrolled but NOT the one the user named.
+    let other_executor = Address::generate(&e);
+    s.fee_forwarder.grant_role(&other_executor, &Symbol::new(&e, "executor"), &s.admin);
+
+    // User intended s.relayer; other_executor tries to front-run.
+    s.fee_forwarder.forward_restricted(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &other_executor,    // actual submitter
+        &s.relayer,         // authorized_executor the user signed for
+    );
 }
