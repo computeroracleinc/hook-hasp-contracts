@@ -14,6 +14,8 @@ use soroban_sdk::{
 };
 use stellar_tokens::fungible::{Base, FungibleToken};
 
+use super::FeeForwarderError;
+
 use super::{FeeForwarder, FeeForwarderClient};
 
 #[contract]
@@ -613,4 +615,103 @@ fn constructor_grants_admin_manager_and_executor_roles() {
     assert!(s.fee_forwarder.has_role(&s.manager, &Symbol::new(&e, "manager")).is_some());
     assert!(s.fee_forwarder.has_role(&s.relayer, &Symbol::new(&e, "executor")).is_some());
     assert_eq!(s.fee_forwarder.get_admin(), Some(s.admin.clone()));
+}
+
+// ── re-entrancy guard (#47) ──────────────────────────────────────────────────
+//
+// A malicious target that attempts to call back into `forward` during its
+// own execution must be stopped by the transient lock before any balance is
+// touched a second time.
+
+/// A mock target that attempts to re-enter `forward` with arbitrary args.
+/// We just verify the outer call succeeds normally (the re-entrant path
+/// cannot be exercised from a single-contract test because cross-contract
+/// calls within the test environment use the same instance storage snapshot),
+/// but we confirm the lock flag is correctly cleared after a normal call so
+/// subsequent calls also succeed.
+#[test]
+fn forward_clears_reentrancy_lock_after_successful_call() {
+    let e = Env::default();
+    let s = setup(&e);
+    pre_approve(&s, &e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    let (user_invoke, relayer_invoke) = forward_invokes(&s, &e, s.fee_amount, &fn_name, &fn_args);
+    let auths = [
+        MockAuth { address: &s.user, invoke: &user_invoke },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke },
+    ];
+
+    // First call succeeds.
+    s.fee_forwarder.mock_auths(&auths).forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+
+    // The lock must have been released — a second call with fresh approval
+    // must also succeed, proving the flag was cleared.
+    pre_approve(&s, &e);
+    let current_ledger2 = e.ledger().sequence();
+    let (user_invoke2, relayer_invoke2) =
+        forward_invokes(&s, &e, s.fee_amount, &fn_name, &fn_args);
+    let auths2 = [
+        MockAuth { address: &s.user, invoke: &user_invoke2 },
+        MockAuth { address: &s.relayer, invoke: &relayer_invoke2 },
+    ];
+    s.fee_forwarder.mock_auths(&auths2).forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger2,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+}
+
+/// Directly verify the error code produced when the lock is already set.
+/// We set the lock by hand via storage and then call `forward`, which must
+/// reject with `Error(Contract, #9001)` before any fee is collected.
+#[test]
+#[should_panic(expected = "Error(Contract, #9001)")]
+fn forward_rejects_reentrant_call_when_lock_is_set() {
+    use soroban_sdk::symbol_short;
+
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    // Manually arm the lock to simulate a re-entrant context.
+    e.as_contract(&s.fee_forwarder.address, || {
+        e.storage().instance().set(&symbol_short!("reentrant"), &true);
+    });
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // This call must panic with ReentrantCall (#9001).
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
 }

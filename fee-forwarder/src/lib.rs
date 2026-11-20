@@ -37,6 +37,13 @@
 //! - `sweep_tokens` — manager-gated withdrawal of fees this contract has
 //!   collected.
 //!
+//! # Re-entrancy protection
+//!
+//! `forward` sets a transient boolean lock in instance storage before invoking
+//! the target contract and clears it afterwards. Any re-entrant call to
+//! `forward` from within the target sees the lock set and panics with
+//! `Error(Contract, #9001)` before any state or balance is touched.
+//!
 //! # Security Warning
 //!
 //! `collect_fee_and_invoke` only authorizes the user's *input* — it does not
@@ -46,7 +53,7 @@
 //! other authorization the account signs.
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Symbol, Val, Vec};
+use soroban_sdk::{contract, contractimpl, contracterror, symbol_short, Address, Env, Symbol, Val, Vec};
 use stellar_access::access_control::{grant_role_no_auth, set_admin, AccessControl};
 use stellar_fee_abstraction::{
     collect_fee_and_invoke, set_allowed_fee_token, sweep_token, FeeAbstractionApproval,
@@ -55,6 +62,18 @@ use stellar_macros::only_role;
 
 const MANAGER_ROLE: Symbol = symbol_short!("manager");
 const EXECUTOR_ROLE: Symbol = symbol_short!("executor");
+/// Instance-storage key for the re-entrancy lock.
+const REENTRANT_KEY: Symbol = symbol_short!("reentrant");
+
+/// Contract-level errors.
+#[contracterror]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum FeeForwarderError {
+    /// `forward` was called re-entrantly from within a target contract
+    /// invocation. Code 9001.
+    ReentrantCall = 9001,
+}
 
 #[contract]
 pub struct FeeForwarder;
@@ -75,6 +94,9 @@ impl FeeForwarder {
     /// Collects `fee_amount` of `fee_token` from `user` and forwards the
     /// call to `target_contract.target_fn(target_args)`, atomically.
     ///
+    /// A transient re-entrancy lock prevents any target contract from
+    /// calling back into `forward` during execution.
+    ///
     /// Requires authorization from both `user` (covering `fee_token`,
     /// `max_fee_amount`, `expiration_ledger`, and the target call — not
     /// `fee_amount` or `relayer`, which are only known once the executor
@@ -83,6 +105,8 @@ impl FeeForwarder {
     ///
     /// # Errors
     ///
+    /// * [`FeeForwarderError::ReentrantCall`] — If `forward` is invoked
+    ///   re-entrantly from within the target contract.
     /// * [`stellar_fee_abstraction::FeeAbstractionError::FeeTokenNotAllowed`]
     ///   - If `fee_token` is not on the allowlist (once the allowlist is
     ///     enabled).
@@ -109,7 +133,14 @@ impl FeeForwarder {
         user: Address,
         relayer: Address,
     ) -> Val {
-        collect_fee_and_invoke(
+        // ── re-entrancy guard: acquire ───────────────────────────────────────
+        let locked: bool = e.storage().instance().get(&REENTRANT_KEY).unwrap_or(false);
+        if locked {
+            panic_with_error!(e, FeeForwarderError::ReentrantCall);
+        }
+        e.storage().instance().set(&REENTRANT_KEY, &true);
+
+        let result = collect_fee_and_invoke(
             e,
             &fee_token,
             fee_amount,
@@ -121,7 +152,12 @@ impl FeeForwarder {
             &user,
             &e.current_contract_address(),
             FeeAbstractionApproval::Lazy,
-        )
+        );
+
+        // ── re-entrancy guard: release ───────────────────────────────────────
+        e.storage().instance().set(&REENTRANT_KEY, &false);
+
+        result
     }
 
     /// Adds `token` to the fee-token allowlist. Manager-gated.
