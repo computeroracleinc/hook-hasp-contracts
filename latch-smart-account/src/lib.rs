@@ -206,5 +206,8 @@ impl Upgradeable for LatchSmartAccount {
     }
 }
 
+#[cfg(feature = "bench")]
+mod bench;
+
 #[cfg(test)]
 mod test;
