@@ -410,7 +410,7 @@ fn test_enforce_rejects_missing_amount_arg() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #6)")] // InvalidTransferArgs
+#[should_panic(expected = "Error(Contract, #13)")] // InvalidAmount
 fn test_enforce_rejects_negative_amount() {
     let (e, smart_account, client) = setup_env();
     let oracle = setup_oracle(&e, ONE_USD);
@@ -420,6 +420,22 @@ fn test_enforce_rejects_negative_amount() {
         install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
 
     let context = transfer_context(&e, &token, -500);
+    client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")] // InvalidAmount
+fn test_enforce_rejects_zero_amount() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 0);
+
+    let rule =
+        install_policy(&e, &client, &smart_account, &oracle, vec![&e, token.clone()], 1_000, 100);
+
+    // A zero-amount transfer must be rejected explicitly — not silently allowed
+    // to pass through with no effect on the spending total.
+    let context = transfer_context(&e, &token, 0);
     client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
 }
 

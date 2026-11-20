@@ -111,6 +111,10 @@ pub enum Error {
     /// (`amount * price` before scaling down). Fails closed rather than
     /// wrapping or saturating to a value that could misstate the spend.
     AmountConversionOverflow = 12,
+    /// The transfer amount was zero or negative. Zero-amount transfers must be
+    /// rejected explicitly so they cannot silently bypass accounting logic or
+    /// inflate the spending history with no-cost entries.
+    InvalidAmount = 13,
 }
 
 /// Installation parameters for the multi-token spending limit policy.
@@ -333,8 +337,10 @@ impl Policy for MultiTokenSpendingLimitPolicy {
     /// # Errors
     ///
     /// * [`Error::InvalidTransferArgs`] - When the context is not a
-    ///   `Context::Contract` invocation of `transfer`, the amount argument is
-    ///   missing or malformed, or the amount is negative.
+    ///   `Context::Contract` invocation of `transfer`, or the amount argument
+    ///   is missing or malformed.
+    /// * [`Error::InvalidAmount`] - When the transfer amount is zero or
+    ///   negative.
     /// * [`Error::TokenNotAllowed`] - When the target contract is not in the
     ///   installed allowlist.
     /// * [`Error::InvalidOracleResponse`] - When `lastprice` returns `None` for
@@ -372,8 +378,8 @@ impl Policy for MultiTokenSpendingLimitPolicy {
         let Ok(amount) = i128::try_from_val(e, &amount_val) else {
             panic_with_error!(e, Error::InvalidTransferArgs)
         };
-        if amount < 0 {
-            panic_with_error!(e, Error::InvalidTransferArgs)
+        if amount <= 0 {
+            panic_with_error!(e, Error::InvalidAmount)
         }
 
         let mut data = get_policy_data(e, context_rule.id, &smart_account);
