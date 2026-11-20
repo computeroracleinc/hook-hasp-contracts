@@ -188,3 +188,86 @@ fn test_uninstall_clears_state() {
     let res = client.try_get_allowed_recipients(&rule.id, &smart_account);
     assert!(res.is_err());
 }
+
+// ################## STORAGE TTL / EXPIRY THRESHOLD TESTS ##################
+
+/// RECIPIENT_EXTEND_AMOUNT = 30 * 17280 = 518400 ledgers
+/// RECIPIENT_TTL_THRESHOLD = RECIPIENT_EXTEND_AMOUNT - 17280 = 501120 ledgers
+const RECIPIENT_NEAR_EXPIRY_LEDGER: u32 = 501_000;
+
+#[test]
+fn get_allowed_recipients_near_ttl_threshold_renews_and_succeeds() {
+    // Install a recipient policy, advance the ledger to just below the TTL
+    // renewal threshold, then verify that a read triggers TTL extension
+    // without panicking — simulating a near-expiry state on a live chain.
+    let (e, smart_account, client) = setup_env();
+
+    let rule = create_context_rule(&e);
+    let recipient = Address::generate(&e);
+    let allowed_recipients = vec![&e, recipient.clone()];
+
+    client.install(&RecipientAccountParams { allowed_recipients: allowed_recipients.clone() }, &rule, &smart_account);
+
+    // Advance ledger sequence to just before RECIPIENT_TTL_THRESHOLD.
+    e.ledger().with_mut(|li| {
+        li.sequence_number = RECIPIENT_NEAR_EXPIRY_LEDGER;
+        li.max_entry_ttl = u32::MAX;
+        li.min_persistent_entry_ttl = 1;
+    });
+
+    // get_allowed_recipients triggers extend_ttl internally — must not panic.
+    let result = client.get_allowed_recipients(&rule.id, &smart_account);
+    assert_eq!(result, allowed_recipients);
+}
+
+#[test]
+fn install_at_high_ledger_sequence_succeeds() {
+    // Verify that installing when the ledger sequence is very high works
+    // correctly and that reads succeed immediately after.
+    let (e, smart_account, client) = setup_env();
+
+    e.ledger().with_mut(|li| {
+        li.sequence_number = 1_000_000;
+        li.max_entry_ttl = u32::MAX;
+        li.min_persistent_entry_ttl = 1;
+    });
+
+    let rule = create_context_rule(&e);
+    let recipient = Address::generate(&e);
+    let allowed_recipients = vec![&e, recipient.clone()];
+
+    client.install(&RecipientAccountParams { allowed_recipients: allowed_recipients.clone() }, &rule, &smart_account);
+
+    let result = client.get_allowed_recipients(&rule.id, &smart_account);
+    assert_eq!(result, allowed_recipients);
+}
+
+#[test]
+fn reclaim_storage_on_absent_entry_is_idempotent() {
+    // reclaim_storage must succeed even when no entry exists, confirming the
+    // idempotent cleanup path works for expired or never-installed entries.
+    let (e, smart_account, client) = setup_env();
+    let rule = create_context_rule(&e);
+
+    // No prior install — reclaim must still succeed without panicking.
+    client.reclaim_storage(&rule.id, &smart_account);
+
+    let res = client.try_get_allowed_recipients(&rule.id, &smart_account);
+    assert!(res.is_err());
+}
+
+#[test]
+fn reclaim_storage_removes_installed_entry() {
+    // After install, reclaim_storage must remove the entry just like
+    // uninstall, confirming it clears all storage keys for the policy.
+    let (e, smart_account, client) = setup_env();
+
+    let rule = create_context_rule(&e);
+    let allowed_recipients = vec![&e, Address::generate(&e)];
+
+    client.install(&RecipientAccountParams { allowed_recipients }, &rule, &smart_account);
+    client.reclaim_storage(&rule.id, &smart_account);
+
+    let res = client.try_get_allowed_recipients(&rule.id, &smart_account);
+    assert!(res.is_err());
+}

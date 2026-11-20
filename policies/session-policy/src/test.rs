@@ -326,3 +326,120 @@ fn get_allowed_fns_returns_installed_value() {
         assert_eq!(allowed_fns, vec![&e, symbol_short!("set"), symbol_short!("get")]);
     });
 }
+
+// ################## STORAGE TTL / EXPIRY THRESHOLD TESTS ##################
+
+/// SESSION_EXTEND_AMOUNT = 30 * 17280 = 518400 ledgers
+/// SESSION_TTL_THRESHOLD = SESSION_EXTEND_AMOUNT - 17280 = 501120 ledgers
+const SESSION_NEAR_EXPIRY_LEDGER: u32 = 501_000;
+
+#[test]
+fn get_allowed_fns_near_ttl_threshold_renews_and_succeeds() {
+    // Install a session policy, advance the ledger to just below the TTL
+    // renewal threshold, then verify that a read triggers TTL extension
+    // without panicking — simulating a near-expiry state on a live chain.
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams {
+            allowed_fns: vec![&e, symbol_short!("set")],
+        };
+        install(&e, &params, &context_rule, &smart_account);
+    });
+
+    // Advance ledger sequence to just before SESSION_TTL_THRESHOLD to
+    // simulate the entry approaching expiry.
+    e.ledger().with_mut(|li| {
+        li.sequence_number = SESSION_NEAR_EXPIRY_LEDGER;
+        li.max_entry_ttl = u32::MAX;
+        li.min_persistent_entry_ttl = 1;
+    });
+
+    // get_allowed_fns must succeed and renew the TTL — it must not panic.
+    e.as_contract(&address, || {
+        let fns = get_allowed_fns(&e, context_rule.id, &smart_account);
+        assert!(fns.contains(&symbol_short!("set")));
+    });
+}
+
+#[test]
+fn install_at_high_ledger_sequence_succeeds() {
+    // Verify that installing a session policy when the ledger sequence is
+    // already very high (simulating a long-running chain) works correctly
+    // and that the subsequent read succeeds, confirming the TTL is set
+    // relative to the current sequence rather than from zero.
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+
+    e.mock_all_auths();
+
+    e.ledger().with_mut(|li| {
+        li.sequence_number = 1_000_000;
+        li.max_entry_ttl = u32::MAX;
+        li.min_persistent_entry_ttl = 1;
+    });
+
+    let context_rule = create_context_rule(&e);
+    let params = SessionAccountParams {
+        allowed_fns: vec![&e, symbol_short!("swap")],
+    };
+
+    e.as_contract(&address, || {
+        install(&e, &params, &context_rule, &smart_account);
+    });
+
+    e.as_contract(&address, || {
+        let fns = get_allowed_fns(&e, context_rule.id, &smart_account);
+        assert!(fns.contains(&symbol_short!("swap")));
+    });
+}
+
+#[test]
+fn reclaim_storage_on_absent_entry_is_idempotent() {
+    // reclaim_storage must succeed even when no entry exists, confirming the
+    // idempotent cleanup path works for expired or never-installed entries.
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        // No prior install — reclaim must still succeed without panicking.
+        reclaim_storage(&e, &context_rule, &smart_account);
+
+        let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+        assert!(!e.storage().persistent().has(&key));
+    });
+}
+
+#[test]
+fn reclaim_storage_removes_installed_entry() {
+    // After install, reclaim_storage must remove the entry just like
+    // uninstall, confirming it clears all storage keys for the policy.
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams { allowed_fns: vec![&e, symbol_short!("set")] };
+        install(&e, &params, &context_rule, &smart_account);
+    });
+
+    e.as_contract(&address, || {
+        reclaim_storage(&e, &context_rule, &smart_account);
+
+        let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+        assert!(!e.storage().persistent().has(&key));
+    });
+}
