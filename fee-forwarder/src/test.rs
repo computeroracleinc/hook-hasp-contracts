@@ -9,7 +9,7 @@ extern crate std;
 // mirroring OZ's own `examples/fee-forwarder-permissioned` test suite.
 use soroban_sdk::{
     contract, contractimpl,
-    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
     vec, Address, Env, IntoVal, MuxedAddress, String, Symbol, TryIntoVal, Val, Vec,
 };
 use stellar_tokens::fungible::{Base, FungibleToken};
@@ -614,3 +614,114 @@ fn constructor_grants_admin_manager_and_executor_roles() {
     assert!(s.fee_forwarder.has_role(&s.relayer, &Symbol::new(&e, "executor")).is_some());
     assert_eq!(s.fee_forwarder.get_admin(), Some(s.admin.clone()));
 }
+
+// ── analytics events ─────────────────────────────────────────────────────────
+
+#[test]
+fn forward_emits_sponsored_call_executed_event() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+
+    // At least one event must have been emitted by the fee-forwarder contract.
+    let contract_events =
+        e.events().all().filter_by_contract(&s.fee_forwarder.address);
+    assert!(
+        !contract_events.events().is_empty(),
+        "expected SponsoredCallExecuted event after forward"
+    );
+}
+
+#[test]
+fn forward_event_not_emitted_when_target_fails() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let fn_name = Symbol::new(&e, "fail");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    // Capture a failing forward — the whole tx reverts so no event should land.
+    let _ = s.fee_forwarder.try_forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+
+    let contract_events =
+        e.events().all().filter_by_contract(&s.fee_forwarder.address);
+    assert!(
+        contract_events.events().is_empty(),
+        "no event should be emitted when the forwarded call fails"
+    );
+}
+
+#[test]
+fn forward_emits_correct_event_fields() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let fn_name = Symbol::new(&e, "greet");
+    let fn_args: Vec<Val> = vec![&e];
+    let current_ledger = e.ledger().sequence();
+
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &current_ledger,
+        &s.target.address,
+        &fn_name,
+        &fn_args,
+        &s.user,
+        &s.relayer,
+    );
+
+    // Retrieve the raw event and inspect its data fields.
+    let events = e.events().all().filter_by_contract(&s.fee_forwarder.address);
+    assert_eq!(events.events().len(), 1, "expected exactly one event");
+
+    // The event data is a tuple: (target_contract, fee_token, fee_amount, max_fee_amount).
+    // Topics are (sponsor, relayer). We verify the full set by decoding the
+    // event using the generated SponsoredCallExecuted type.
+    let (topics, data): (Vec<Val>, super::SponsoredCallExecuted) =
+        events.events().get(0).unwrap();
+
+    // Topics contain the two #[topic] fields: sponsor then relayer.
+    // Index 0 is the contract symbol (event name) automatically prepended by
+    // the SDK; sponsor is at 1, relayer at 2.
+    let sponsor: Address = topics.get(1).unwrap().try_into_val(&e).unwrap();
+    let relayer: Address = topics.get(2).unwrap().try_into_val(&e).unwrap();
+
+    assert_eq!(sponsor, s.user);
+    assert_eq!(relayer, s.relayer);
+    assert_eq!(data.target_contract, s.target.address);
+    assert_eq!(data.fee_token, s.token.address);
+    assert_eq!(data.fee_amount, s.fee_amount);
+    assert_eq!(data.max_fee_amount, s.max_fee_amount);
+}
+

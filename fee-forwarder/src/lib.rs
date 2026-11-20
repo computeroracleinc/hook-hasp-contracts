@@ -37,6 +37,13 @@
 //! - `sweep_tokens` — manager-gated withdrawal of fees this contract has
 //!   collected.
 //!
+//! # Events
+//!
+//! Every successful `forward` call emits a [`SponsoredCallExecuted`] event
+//! containing `sponsor` (user), `relayer`, `target_contract`, `fee_token`,
+//! `fee_amount`, and `max_fee_amount`. Indexers can reconstruct a complete
+//! history of sponsored transactions and fee expenditure from these events.
+//!
 //! # Security Warning
 //!
 //! `collect_fee_and_invoke` only authorizes the user's *input* — it does not
@@ -46,7 +53,9 @@
 //! other authorization the account signs.
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Symbol, Val, Vec};
+use soroban_sdk::{
+    contract, contractevent, contractimpl, symbol_short, Address, Env, Symbol, Val, Vec,
+};
 use stellar_access::access_control::{grant_role_no_auth, set_admin, AccessControl};
 use stellar_fee_abstraction::{
     collect_fee_and_invoke, set_allowed_fee_token, sweep_token, FeeAbstractionApproval,
@@ -55,6 +64,39 @@ use stellar_macros::only_role;
 
 const MANAGER_ROLE: Symbol = symbol_short!("manager");
 const EXECUTOR_ROLE: Symbol = symbol_short!("executor");
+
+// ── analytics events ─────────────────────────────────────────────────────────
+
+/// Emitted after every successful `forward` call.
+///
+/// Fields:
+/// - `sponsor` (topic) — the user whose fee was collected.
+/// - `relayer` (topic) — the executor that submitted the transaction.
+/// - `target_contract` — the contract the call was forwarded to.
+/// - `fee_token` — the SEP-41 token used to pay the fee.
+/// - `fee_amount` — the actual fee amount collected.
+/// - `max_fee_amount` — the maximum fee the user authorised.
+///
+/// Indexers should subscribe to `SponsoredCallExecuted` events on this
+/// contract to build historical gas expenditure analytics.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SponsoredCallExecuted {
+    /// The user who paid the fee (sponsor of the gasless call).
+    #[topic]
+    pub sponsor: Address,
+    /// The executor address that submitted the forwarded transaction.
+    #[topic]
+    pub relayer: Address,
+    /// The contract the call was forwarded to.
+    pub target_contract: Address,
+    /// SEP-41 token address used as the fee currency.
+    pub fee_token: Address,
+    /// Actual fee amount collected from the sponsor.
+    pub fee_amount: i128,
+    /// Maximum fee amount the sponsor authorised.
+    pub max_fee_amount: i128,
+}
 
 #[contract]
 pub struct FeeForwarder;
@@ -80,6 +122,9 @@ impl FeeForwarder {
     /// `fee_amount` or `relayer`, which are only known once the executor
     /// picks up the request) and `relayer` (who must hold the `executor`
     /// role).
+    ///
+    /// Emits a [`SponsoredCallExecuted`] event on every successful execution
+    /// for indexer and analytics purposes.
     ///
     /// # Errors
     ///
@@ -109,7 +154,7 @@ impl FeeForwarder {
         user: Address,
         relayer: Address,
     ) -> Val {
-        collect_fee_and_invoke(
+        let result = collect_fee_and_invoke(
             e,
             &fee_token,
             fee_amount,
@@ -121,7 +166,22 @@ impl FeeForwarder {
             &user,
             &e.current_contract_address(),
             FeeAbstractionApproval::Lazy,
-        )
+        );
+
+        // Emit analytics event after the successful fee collection and
+        // target invocation. If `collect_fee_and_invoke` panics, this line
+        // is never reached and the event is not emitted, preserving atomicity.
+        SponsoredCallExecuted {
+            sponsor: user,
+            relayer,
+            target_contract,
+            fee_token,
+            fee_amount,
+            max_fee_amount,
+        }
+        .publish(e);
+
+        result
     }
 
     /// Adds `token` to the fee-token allowlist. Manager-gated.
