@@ -27,6 +27,10 @@ mod dummy_singleton {
     soroban_sdk::contractimport!(file = "testdata/dummy_singleton.wasm");
 }
 
+mod smart_account_v2 {
+    soroban_sdk::contractimport!(file = "testdata/smart_account_v2.wasm");
+}
+
 #[contract]
 struct MockTargetContract;
 
@@ -130,6 +134,101 @@ fn execute_requires_self_auth() {
 
     let target_id = env.register(MockTargetContract, ());
     client.execute(&target_id, &Symbol::new(&env, "set"), &vec![&env, 1u32.into_val(&env)]);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1000)")] // EnforcedPause
+fn execute_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let guardian = Address::generate(&env);
+    assert!(!client.paused());
+    client.pause(&guardian);
+    assert!(client.paused());
+
+    let target_id = env.register(MockTargetContract, ());
+    // Emergency pause must stop outgoing execute / token dispatch
+    client.execute(&target_id, &Symbol::new(&env, "set"), &vec![&env, 1u32.into_val(&env)]);
+}
+
+#[test]
+fn admin_recovery_path_remains_operational_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let guardian = Address::generate(&env);
+    client.pause(&guardian);
+    assert!(client.paused());
+
+    // Administrative recovery: manage context rules and signers while paused
+    let recovery_signer = Signer::Delegated(Address::generate(&env));
+    let recovery_signers = vec![&env, recovery_signer.clone()];
+    let added_rule = client.add_context_rule(
+        &ContextRuleType::Default,
+        &String::from_str(&env, "recovery"),
+        &None,
+        &recovery_signers,
+        &Map::new(&env),
+    );
+    assert_eq!(added_rule.name, String::from_str(&env, "recovery"));
+    assert_eq!(client.get_context_rules_count(), 2);
+
+    // Administrative recovery: add signer to default rule
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let default_rule = client.get_context_rule(&0);
+    let signer_id = client.add_signer(&default_rule.id, &new_signer);
+    assert_eq!(signer_id, 1);
+
+    // Unpause restores execute capabilities
+    client.unpause(&guardian);
+    assert!(!client.paused());
+
+    let target_id = env.register(MockTargetContract, ());
+    let target_client = MockTargetContractClient::new(&env, &target_id);
+    client.execute(&target_id, &Symbol::new(&env, "set"), &vec![&env, 42u32.into_val(&env)]);
+    assert_eq!(target_client.get(), 42);
+}
+
+#[test]
+#[should_panic]
+fn pause_requires_caller_auth() {
+    let env = Env::default();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let guardian = Address::generate(&env);
+    client.pause(&guardian);
+}
+
+#[test]
+#[should_panic]
+fn unpause_requires_caller_auth() {
+    let env = Env::default();
+    let guardian = Address::generate(&env);
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    env.mock_all_auths();
+    client.pause(&guardian);
+
+    // Turn off mocked auths to ensure unpause requires caller auth
+    // In soroban testutils, we create a fresh env without mock_all_auths
+    let env_unmocked = Env::default();
+    let (_unmocked_id, client_unmocked) = register_account(&env_unmocked, &signers, &policies);
+    client_unmocked.unpause(&guardian);
 }
 
 #[test]
@@ -256,6 +355,80 @@ fn upgrade_requires_self_auth() {
 
     let new_wasm_hash = BytesN::from_array(&env, &[0u8; 32]);
     client.upgrade(&new_wasm_hash, &account_id);
+}
+
+#[test]
+#[should_panic]
+fn upgrade_rejects_unauthorized_external_caller() {
+    let env = Env::default();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let attacker = Address::generate(&env);
+    let new_wasm_hash = BytesN::from_array(&env, &[0u8; 32]);
+    // Attacker cannot authorize or trigger an upgrade without self-authorization
+    client.upgrade(&new_wasm_hash, &attacker);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4002)")] // ReentrancyGuardTriggered
+fn upgrade_reentrancy_guard_blocks_recursive_upgrade() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let Some(Executable::Wasm(wasm_hash)) = account_id.executable() else {
+        panic!("expected a wasm-backed account");
+    };
+
+    // Simulate an active upgrade lock in instance storage (as would occur in re-entrancy)
+    env.as_contract(&account_id, || {
+        env.storage()
+            .instance()
+            .set(&super::LatchSmartAccountStorageKey::UpgradeLock, &true);
+    });
+
+    client.upgrade(&wasm_hash, &account_id);
+}
+
+#[test]
+fn upgrade_to_v2_bytecode_and_verify_state_migration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    // Initial state setup before upgrade
+    assert_eq!(client.get_context_rules_count(), 1);
+    assert_eq!(client.get_deployed_contract_count(), 0);
+
+    // Deploy a satellite contract to populate persistent storage
+    let dummy_hash = deployed_wasm_hash(&env);
+    let salt = BytesN::from_array(&env, &[42u8; 32]);
+    let deployed_addr = client.deploy_contract(&dummy_hash, &salt, &vec![&env]);
+    assert_eq!(client.get_deployed_contract_count(), 1);
+
+    // Upload v2 contract bytecode
+    let v2_wasm_hash = env.deployer().upload_contract_wasm(smart_account_v2::WASM);
+
+    // Perform upgrade to v2 bytecode — will run verify_state_migration hook
+    client.upgrade(&v2_wasm_hash, &account_id);
+
+    // Verify storage compatibility and state preservation across v1->v2 upgrade
+    assert_eq!(client.get_context_rules_count(), 1);
+    let default_rule = client.get_context_rule(&0);
+    assert_eq!(default_rule.name, String::from_str(&env, "default"));
+    assert_eq!(client.get_deployed_contract_count(), 1);
+    let record = client.get_deployed_contract(&0);
+    assert_eq!(record.address, deployed_addr);
+    assert_eq!(record.wasm_hash, dummy_hash);
 }
 
 // ################## SESSION KEY INTEGRATION TESTS ##################

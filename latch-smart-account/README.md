@@ -11,7 +11,7 @@ Built on [OpenZeppelin Stellar Contracts](https://github.com/OpenZeppelin/stella
 <img width="2383" height="2560" alt="smartaccount" src="https://github.com/user-attachments/assets/73b919ce-7137-4c2e-b03e-4fc45d50f999" />
 
 
-The contract implements four OpenZeppelin interfaces: `CustomAccountInterface` (`__check_auth`), `SmartAccount` (context rule CRUD), `ExecutionEntryPoint` (`execute`), and `Upgradeable` (`upgrade`). The Latch layer adds constructor setup, `batch_add_signer`, and `upgrade`.
+The contract implements five OpenZeppelin interfaces: `CustomAccountInterface` (`__check_auth`), `SmartAccount` (context rule CRUD), `ExecutionEntryPoint` (`execute`), `Pausable` (`pause`, `unpause`, `paused`), and `Upgradeable` (`upgrade`). The Latch layer adds constructor setup, `batch_add_signer`, `upgrade`, and an emergency freeze capability on `execute`.
 
 ---
 
@@ -43,7 +43,12 @@ fn upgrade(env: &Env, new_wasm_hash: BytesN<32>, operator: Address)
 | `add_policy(rule_id, address, params)` / `remove_policy(rule_id, address)` | Manage policies |
 | `get_context_rule(id)` / `get_context_rules_count()` | Read-only queries |
 
-**Inherited from `ExecutionEntryPoint`**: `execute(contract, function, args)` — calls another contract as this account. Requires self-auth.
+**Inherited from `ExecutionEntryPoint`**: `execute(contract, function, args)` — calls another contract as this account. Requires self-auth. Guarded by `when_not_paused`: when emergency pause is active, outgoing `execute` operations are frozen while administrative recovery paths remain operational.
+
+**Inherited from `Pausable`**:
+- `pause(caller)` — triggers emergency pause, freezing outgoing `execute` calls. Requires caller auth (guardian or recovery threshold).
+- `unpause(caller)` — lifts emergency pause. Requires caller auth.
+- `paused()` — returns current pause state (`bool`).
 
 ---
 

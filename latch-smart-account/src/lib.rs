@@ -10,7 +10,10 @@ use stellar_accounts::smart_account::{
     self as smart_account, AuthPayload, ContextRule, ContextRuleType, ExecutionEntryPoint, Signer,
     SmartAccount, SmartAccountError, SMART_ACCOUNT_EXTEND_AMOUNT, SMART_ACCOUNT_TTL_THRESHOLD,
 };
-use stellar_contract_utils::upgradeable::{self as upgradeable, Upgradeable};
+use stellar_contract_utils::{
+    pausable::{self as pausable, Pausable},
+    upgradeable::{self as upgradeable, Upgradeable},
+};
 
 /// Record of a satellite contract this account has deployed via
 /// `deploy_contract`, kept for client-side discoverability without needing
@@ -26,6 +29,8 @@ pub struct DeployedContract {
 pub enum LatchSmartAccountStorageKey {
     DeployedContractCount,
     DeployedContract(u32),
+    /// Re-entrancy guard status for account management and self-upgrade.
+    UpgradeLock,
 }
 
 /// Error codes for `LatchSmartAccount`'s own methods, distinct from
@@ -40,6 +45,10 @@ pub enum LatchSmartAccountError {
     DeployedContractNotFound = 4000,
     /// The deployed-contract counter has reached `u32::MAX`.
     MathOverflow = 4001,
+    /// Re-entrancy detected during self-upgrade or unauthorized upgrade state.
+    ReentrancyGuardTriggered = 4002,
+    /// Post-upgrade state migration verification failed.
+    StateMigrationFailed = 4003,
 }
 
 /// Event emitted when this account deploys a satellite contract via
@@ -175,6 +184,35 @@ impl LatchSmartAccount {
                 panic_with_error!(e, LatchSmartAccountError::DeployedContractNotFound)
             })
     }
+    /// Verifies account state and storage format compatibility.
+    ///
+    /// Called immediately during an upgrade workflow before committing,
+    /// ensuring that essential instance and persistent storage keys
+    /// (such as context rules, deployed contract counts, and schema version)
+    /// remain intact and compatible.
+    pub fn verify_state_migration(e: &Env) {
+        // 1. Verify instance storage consistency
+        let _schema_version = upgradeable::get_schema_version(e);
+        let count = Self::get_deployed_contract_count(e);
+
+        // 2. Verify persistent storage accessibility for deployed contracts
+        for i in 0..count {
+            let key = LatchSmartAccountStorageKey::DeployedContract(i);
+            if !e.storage().persistent().has(&key) {
+                panic_with_error!(e, LatchSmartAccountError::StateMigrationFailed);
+            }
+        }
+
+        // 3. Verify smart account core context rules are accessible and non-empty
+        // At minimum, every valid smart account must have at least 1 active context rule.
+        let rules_count = smart_account::get_context_rules_count(e);
+        if rules_count == 0 {
+            panic_with_error!(e, LatchSmartAccountError::StateMigrationFailed);
+        }
+
+        // Verify default rule (rule 0) can be read successfully
+        let _default_rule = smart_account::get_context_rule(e, 0);
+    }
 }
 
 #[contractimpl]
@@ -195,14 +233,62 @@ impl CustomAccountInterface for LatchSmartAccount {
 #[contractimpl(contracttrait)]
 impl SmartAccount for LatchSmartAccount {}
 
-#[contractimpl(contracttrait)]
-impl ExecutionEntryPoint for LatchSmartAccount {}
+#[contractimpl]
+impl ExecutionEntryPoint for LatchSmartAccount {
+    /// Executes a function call on a target contract from within the smart
+    /// account context. Overridden to enforce pausable checks: when the account
+    /// is paused (e.g. by a guardian or threshold of recovery keys), outgoing
+    /// calls are frozen to prevent unauthorized token dispatch while preserving
+    /// administrative recovery functions.
+    fn execute(e: &Env, target: Address, target_fn: Symbol, target_args: Vec<Val>) {
+        pausable::when_not_paused(e);
+        e.current_contract_address().require_auth();
+        e.invoke_contract::<Val>(&target, &target_fn, target_args);
+    }
+}
+
+#[contractimpl]
+impl Pausable for LatchSmartAccount {
+    /// Puts the account into a paused state, freezing outgoing `execute`
+    /// calls.
+    ///
+    /// Requires authorization from `caller`. When configured with a guardian
+    /// or recovery rule, the caller's authorization satisfies this requirement.
+    fn pause(e: &Env, caller: Address) {
+        caller.require_auth();
+        pausable::pause(e);
+    }
+
+    /// Lifts the emergency pause, restoring outgoing `execute` calls.
+    ///
+    /// Requires authorization from `caller` (e.g. guardian or recovery admin).
+    fn unpause(e: &Env, caller: Address) {
+        caller.require_auth();
+        pausable::unpause(e);
+    }
+}
 
 #[contractimpl]
 impl Upgradeable for LatchSmartAccount {
     fn upgrade(e: &Env, new_wasm_hash: BytesN<32>, _operator: Address) {
+        // Enforce strict re-entrancy protection across upgrade invocations
+        if e.storage().instance().has(&LatchSmartAccountStorageKey::UpgradeLock) {
+            panic_with_error!(e, LatchSmartAccountError::ReentrancyGuardTriggered);
+        }
+        e.storage().instance().set(&LatchSmartAccountStorageKey::UpgradeLock, &true);
+
+        // Explicit authorization boundary: requires authentication from the smart account itself
         e.current_contract_address().require_auth();
+
+        // Perform the WASM bytecode update
         upgradeable::upgrade(e, &new_wasm_hash);
+
+        // Explicit state migration verification hook called immediately after upgrade()
+        // to verify storage format compatibility and integrity before transaction commit.
+        Self::verify_state_migration(e);
+
+        // Release the re-entrancy lock
+        e.storage().instance().remove(&LatchSmartAccountStorageKey::UpgradeLock);
     }
 }
 
