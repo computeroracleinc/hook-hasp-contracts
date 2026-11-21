@@ -13,6 +13,7 @@ use crate::{
     oracle::{Asset, PriceData},
     MultiTokenSpendingLimitAccountParams, MultiTokenSpendingLimitPolicy,
     MultiTokenSpendingLimitPolicyClient, LEDGER_CLOSE_TIME_SECS, MAX_STALENESS_LEDGERS,
+    ROLLING_24_HOURS_LEDGERS, ROLLING_7_DAYS_LEDGERS,
 };
 
 /// $1.00 at the mock oracle's default 8-decimal fixed-point convention.
@@ -615,6 +616,159 @@ fn test_enforce_allows_spend_again_after_window_expires() {
     // ...but once the rolling window has fully passed, the old entry is
     // evicted and the same spend succeeds.
     e.ledger().set_sequence_number(e.ledger().sequence() + period_ledgers + 1);
+    client.enforce(&transfer_context(&e, &token, 900), &Vec::new(&e), &rule, &smart_account);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    assert_eq!(data.cached_total_spent_usd, 900);
+    assert_eq!(data.spending_history.len(), 1);
+}
+
+// ################## ROLLING WINDOW EXPIRATION ##################
+
+/// Re-stamps the mock oracle with the current ledger timestamp, so tests can
+/// jump the clock past the 500-second staleness bound and still get a price.
+fn refresh_price(e: &Env, oracle: &Address) {
+    let oracle_client = MockOracleClient::new(e, oracle);
+    oracle_client.set_price(&Some(PriceData { price: ONE_USD, timestamp: e.ledger().timestamp() }));
+}
+
+#[test]
+fn test_window_constants_are_the_standard_rolling_windows() {
+    assert_eq!(ROLLING_24_HOURS_LEDGERS, 17_280);
+    assert_eq!(ROLLING_7_DAYS_LEDGERS, 120_960);
+}
+
+#[test]
+fn test_enforce_records_entry_timestamp() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 0);
+
+    let rule = install_policy(
+        &e,
+        &client,
+        &smart_account,
+        &oracle,
+        vec![&e, token.clone()],
+        1_000,
+        ROLLING_24_HOURS_LEDGERS,
+    );
+
+    let timestamp_before = e.ledger().timestamp();
+    client.enforce(&transfer_context(&e, &token, 500), &Vec::new(&e), &rule, &smart_account);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    let entry = data.spending_history.get(0).unwrap();
+    assert_eq!(entry.timestamp, timestamp_before);
+    assert_eq!(entry.ledger, e.ledger().sequence());
+    assert_eq!(entry.amount_usd, 500);
+}
+
+#[test]
+fn test_enforce_resets_after_24_hours_of_elapsed_time() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 0);
+
+    let rule = install_policy(
+        &e,
+        &client,
+        &smart_account,
+        &oracle,
+        vec![&e, token.clone()],
+        1_000,
+        ROLLING_24_HOURS_LEDGERS,
+    );
+
+    client.enforce(&transfer_context(&e, &token, 900), &Vec::new(&e), &rule, &smart_account);
+
+    // One second short of a full day: the expenditure is still inside the
+    // window, so the limit still bites (900 + 900 > 1,000).
+    e.ledger().set_timestamp(e.ledger().timestamp() + 86_400 - 1);
+    refresh_price(&e, &oracle);
+    let blocked = client.try_enforce(
+        &transfer_context(&e, &token, 900),
+        &Vec::new(&e),
+        &rule,
+        &smart_account,
+    );
+    assert!(blocked.is_err());
+
+    // One second later the 24-hour window has rolled past the entry: it is
+    // evicted, the cached total resets, and the full limit is available
+    // again — without the ledger sequence ever moving.
+    e.ledger().set_timestamp(e.ledger().timestamp() + 1);
+    refresh_price(&e, &oracle);
+    client.enforce(&transfer_context(&e, &token, 900), &Vec::new(&e), &rule, &smart_account);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    assert_eq!(data.cached_total_spent_usd, 900);
+    assert_eq!(data.spending_history.len(), 1);
+}
+
+#[test]
+fn test_enforce_resets_after_7_days_of_elapsed_time() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 0);
+
+    let rule = install_policy(
+        &e,
+        &client,
+        &smart_account,
+        &oracle,
+        vec![&e, token.clone()],
+        1_000,
+        ROLLING_7_DAYS_LEDGERS,
+    );
+
+    client.enforce(&transfer_context(&e, &token, 900), &Vec::new(&e), &rule, &smart_account);
+
+    // Still inside the 7-day window.
+    e.ledger().set_timestamp(e.ledger().timestamp() + 604_800 - 1);
+    refresh_price(&e, &oracle);
+    let blocked = client.try_enforce(
+        &transfer_context(&e, &token, 900),
+        &Vec::new(&e),
+        &rule,
+        &smart_account,
+    );
+    assert!(blocked.is_err());
+
+    // Past the 7-day window: the entry expires and spending works again.
+    e.ledger().set_timestamp(e.ledger().timestamp() + 1);
+    refresh_price(&e, &oracle);
+    client.enforce(&transfer_context(&e, &token, 900), &Vec::new(&e), &rule, &smart_account);
+
+    let data = client.get_policy_data(&rule.id, &smart_account);
+    assert_eq!(data.cached_total_spent_usd, 900);
+    assert_eq!(data.spending_history.len(), 1);
+}
+
+#[test]
+fn test_enforce_window_expiry_does_not_wrap_at_extreme_timestamp() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 0);
+
+    let rule = install_policy(
+        &e,
+        &client,
+        &smart_account,
+        &oracle,
+        vec![&e, token.clone()],
+        1_000,
+        ROLLING_24_HOURS_LEDGERS,
+    );
+
+    client.enforce(&transfer_context(&e, &token, 900), &Vec::new(&e), &rule, &smart_account);
+
+    // At `u64::MAX` the window cutoff still has to be computed by saturating
+    // subtraction: a wrapped cutoff would keep the old entry alive and make
+    // this second transfer fail.
+    e.ledger().set_timestamp(u64::MAX);
+    refresh_price(&e, &oracle);
+
     client.enforce(&transfer_context(&e, &token, 900), &Vec::new(&e), &rule, &smart_account);
 
     let data = client.get_policy_data(&rule.id, &smart_account);

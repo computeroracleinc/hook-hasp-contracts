@@ -26,6 +26,28 @@
 //! normalized to a whole-token count before pricing, so tokens with different
 //! decimals share one cap correctly.
 //!
+//! # Rolling windows
+//!
+//! The cap applies over a **rolling** window that is tracked per spending
+//! entry and decays as time passes: an entry leaves the window as soon as
+//! either clock says the window length has elapsed since it was recorded —
+//! the ledger sequence *or* the ledger timestamp, whichever gets there first.
+//! On a live network both advance together (one ledger ≈ 5 seconds), so the
+//! two cutoffs agree; using both means the window still expires accurately
+//! when only one of them moves.
+//!
+//! Typical window sizes are the two standard ones, named by the
+//! [`ROLLING_24_HOURS_LEDGERS`] and [`ROLLING_7_DAYS_LEDGERS`] constants:
+//!
+//! - **24 hours** → `period_ledgers = 17_280`
+//! - **7 days** → `period_ledgers = 120_960`
+//!
+//! Expenditures recorded inside the window count against
+//! `spending_limit_usd`; once the window has fully passed, every entry in it
+//! is evicted, the cached total drops back to zero, and the full limit is
+//! available again — no manual reset, and no reliance on a fixed
+//! "day boundary" that a slow or halted ledger could shift.
+//!
 //! # Oracle interface
 //!
 //! The configured oracle must implement the SEP-40 "Price Oracle Consumer"
@@ -121,7 +143,10 @@ pub struct MultiTokenSpendingLimitAccountParams {
     /// `period_ledgers`, in **whole US dollars** (integer). Transfers worth
     /// less than $1 truncate toward zero for accounting purposes.
     pub spending_limit_usd: i128,
-    /// The rolling window size, in ledgers, over which the limit applies.
+    /// The rolling window size, in ledgers, over which the limit applies —
+    /// [`ROLLING_24_HOURS_LEDGERS`] (17,280) for a 24-hour window or
+    /// [`ROLLING_7_DAYS_LEDGERS`] (120,960) for a 7-day window. The window
+    /// decays with elapsed time as well as with ledger sequences.
     pub period_ledgers: u32,
     /// The SEP-40 / Reflector-compatible oracle contract queried for each
     /// token's USD price. Fixed at install time.
@@ -136,6 +161,10 @@ pub struct MultiTokenSpendingLimitAccountParams {
 pub struct SpendingEntry {
     pub amount_usd: i128,
     pub ledger: u32,
+    /// Ledger timestamp (seconds since the Stellar epoch) at which this
+    /// expenditure was recorded, so the window can decay with the passage of
+    /// time and not only with ledger sequences.
+    pub timestamp: u64,
 }
 
 /// Internal storage structure for a single `(smart_account, context_rule)`
@@ -171,6 +200,15 @@ pub enum DataKey {
 const DAY_IN_LEDGERS: u32 = 17280;
 const POLICY_EXTEND_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
 const POLICY_TTL_THRESHOLD: u32 = POLICY_EXTEND_AMOUNT - DAY_IN_LEDGERS;
+
+/// Rolling **24-hour** spending window, in ledgers (17,280 ledgers at the
+/// average 5-second ledger close time). Pass this as `period_ledgers` to cap
+/// spending over the last day.
+pub const ROLLING_24_HOURS_LEDGERS: u32 = DAY_IN_LEDGERS;
+
+/// Rolling **7-day** spending window, in ledgers (120,960 ledgers). Pass
+/// this as `period_ledgers` to cap spending over the last week.
+pub const ROLLING_7_DAYS_LEDGERS: u32 = 7 * DAY_IN_LEDGERS;
 
 /// Maximum number of spending entries to keep in history. Bounds the storage
 /// size and the linear eviction scan performed on every `enforce` call.
@@ -210,21 +248,40 @@ fn get_policy_data(e: &Env, context_rule_id: u32, smart_account: &Address) -> Po
         .unwrap_or_else(|| panic_with_error!(e, Error::NotInstalled))
 }
 
-/// Evicts spending entries older than the rolling window and returns the
-/// total USD amount removed, so the caller can keep `cached_total_spent_usd`
-/// in sync without re-summing the whole history.
+/// Length of a rolling window in seconds: `period_ledgers` converted with the
+/// average ledger close time. Saturates rather than wrapping for inputs too
+/// large to represent, so a window length is never derived from a wrapped
+/// value.
+fn window_seconds(period_ledgers: u32) -> u64 {
+    u64::from(period_ledgers).saturating_mul(LEDGER_CLOSE_TIME_SECS)
+}
+
+/// Evicts spending entries that have fallen out of the rolling window and
+/// returns the total USD amount removed, so the caller can keep
+/// `cached_total_spent_usd` in sync without re-summing the whole history.
+///
+/// An entry is out of the window when *either* clock says so:
+///
+/// - `entry.ledger <= current_ledger - period_ledgers`, or
+/// - `entry.timestamp <= current_timestamp - window_seconds(period_ledgers)`.
+///
+/// Both subtractions saturate at zero instead of wrapping, so a ledger early
+/// in its sequence or a clock near zero can never produce a cutoff that
+/// evicts (or keeps) the wrong entries.
 fn cleanup_old_entries(
     spending_history: &mut Vec<SpendingEntry>,
     current_ledger: u32,
+    current_timestamp: u64,
     period_ledgers: u32,
 ) -> i128 {
     let cutoff_ledger = current_ledger.saturating_sub(period_ledgers);
+    let cutoff_timestamp = current_timestamp.saturating_sub(window_seconds(period_ledgers));
     let mut removed_total: i128 = 0;
 
-    // Entries are appended in increasing ledger order, so the oldest ones
-    // are always at the front.
+    // Entries are appended in increasing ledger (and timestamp) order, so the
+    // oldest ones are always at the front.
     while let Some(entry) = spending_history.get(0) {
-        if entry.ledger <= cutoff_ledger {
+        if entry.ledger <= cutoff_ledger || entry.timestamp <= cutoff_timestamp {
             removed_total = removed_total.saturating_add(entry.amount_usd);
             spending_history.pop_front();
         } else {
@@ -415,9 +472,14 @@ impl Policy for MultiTokenSpendingLimitPolicy {
             .unwrap_or_else(|| panic_with_error!(e, Error::AmountConversionOverflow));
 
         // Clean up old entries outside the rolling window before checking
-        // the limit, so the cached total matches the live window.
-        let removed_amount =
-            cleanup_old_entries(&mut data.spending_history, current_ledger, data.period_ledgers);
+        // the limit, so the cached total matches the live window. Entries
+        // age out on the ledger sequence and on elapsed time alike.
+        let removed_amount = cleanup_old_entries(
+            &mut data.spending_history,
+            current_ledger,
+            current_timestamp,
+            data.period_ledgers,
+        );
         data.cached_total_spent_usd = data.cached_total_spent_usd.saturating_sub(removed_amount);
 
         if data.cached_total_spent_usd.saturating_add(amount_usd) > data.spending_limit_usd {
@@ -428,7 +490,11 @@ impl Policy for MultiTokenSpendingLimitPolicy {
             panic_with_error!(e, Error::HistoryCapacityExceeded)
         }
 
-        data.spending_history.push_back(SpendingEntry { amount_usd, ledger: current_ledger });
+        data.spending_history.push_back(SpendingEntry {
+            amount_usd,
+            ledger: current_ledger,
+            timestamp: current_timestamp,
+        });
         data.cached_total_spent_usd = data.cached_total_spent_usd.saturating_add(amount_usd);
 
         let key = DataKey::AccountContext(smart_account, context_rule.id);
