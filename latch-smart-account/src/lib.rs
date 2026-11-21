@@ -26,6 +26,7 @@ pub struct DeployedContract {
 pub enum LatchSmartAccountStorageKey {
     DeployedContractCount,
     DeployedContract(u32),
+    ReentrancyLock,
 }
 
 /// Error codes for `LatchSmartAccount`'s own methods, distinct from
@@ -33,13 +34,16 @@ pub enum LatchSmartAccountStorageKey {
 /// numbered 3000+). Numbered starting at 4000 so a raw error code seen on
 /// this contract is unambiguous about which enum it came from.
 #[contracterror]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum LatchSmartAccountError {
     /// No deployed contract is recorded at the requested index.
     DeployedContractNotFound = 4000,
     /// The deployed-contract counter has reached `u32::MAX`.
     MathOverflow = 4001,
+    /// A re-entrant call into `execute` or `deploy_contract` was attempted
+    /// while a state lock was active.
+    ReentrantCall = 4002,
 }
 
 /// Event emitted when this account deploys a satellite contract via
@@ -110,6 +114,8 @@ impl LatchSmartAccount {
     ///
     /// * [`LatchSmartAccountError::MathOverflow`] - If the deployed-contract
     ///   counter has reached `u32::MAX`.
+    /// * [`LatchSmartAccountError::ReentrantCall`] - If a re-entrant call is
+    ///   made while `deploy_contract` or `execute` is already in progress.
     ///
     /// # Events
     ///
@@ -121,6 +127,8 @@ impl LatchSmartAccount {
         salt: BytesN<32>,
         constructor_args: Vec<Val>,
     ) -> Address {
+        acquire_reentrancy_lock(e);
+
         let address =
             e.deployer().with_current_contract(salt).deploy_v2(wasm_hash.clone(), constructor_args);
 
@@ -142,6 +150,8 @@ impl LatchSmartAccount {
         );
 
         ContractDeployed { address: address.clone(), wasm_hash }.publish(e);
+
+        release_reentrancy_lock(e);
 
         address
     }
@@ -195,8 +205,14 @@ impl CustomAccountInterface for LatchSmartAccount {
 #[contractimpl(contracttrait)]
 impl SmartAccount for LatchSmartAccount {}
 
-#[contractimpl(contracttrait)]
-impl ExecutionEntryPoint for LatchSmartAccount {}
+#[contractimpl]
+impl ExecutionEntryPoint for LatchSmartAccount {
+    fn execute(e: &Env, target: Address, target_fn: Symbol, target_args: Vec<Val>) {
+        acquire_reentrancy_lock(e);
+        smart_account::execute(e, &target, &target_fn, &target_args);
+        release_reentrancy_lock(e);
+    }
+}
 
 #[contractimpl]
 impl Upgradeable for LatchSmartAccount {
@@ -204,6 +220,18 @@ impl Upgradeable for LatchSmartAccount {
         e.current_contract_address().require_auth();
         upgradeable::upgrade(e, &new_wasm_hash);
     }
+}
+
+fn acquire_reentrancy_lock(e: &Env) {
+    let key = LatchSmartAccountStorageKey::ReentrancyLock;
+    if e.storage().temporary().get::<_, bool>(&key).unwrap_or(false) {
+        panic_with_error!(e, LatchSmartAccountError::ReentrantCall);
+    }
+    e.storage().temporary().set(&key, &true);
+}
+
+fn release_reentrancy_lock(e: &Env) {
+    e.storage().temporary().remove(&LatchSmartAccountStorageKey::ReentrancyLock);
 }
 
 #[cfg(test)]

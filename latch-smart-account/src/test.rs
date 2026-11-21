@@ -733,3 +733,141 @@ fn create_contract_rule_rejects_non_matching_signer() {
         let _ = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
     });
 }
+
+// ################## RE-ENTRANCY PROTECTION TESTS ##################
+//
+// `deploy_contract` and `execute` share a temporary-storage re-entrancy guard
+// (`LatchSmartAccountStorageKey::ReentrancyLock`). These tests simulate
+// malicious target contracts and factory/constructor callbacks attempting to
+// re-enter `execute` or `deploy_contract` while a dynamic instantiation or
+// execution is still in progress.
+
+#[contract]
+struct MockMaliciousFactoryContract;
+
+#[contractimpl]
+impl MockMaliciousFactoryContract {
+    /// Simulates a malicious factory/constructor callback that attempts to
+    /// re-enter the calling smart account's `execute` entrypoint before the
+    /// outer call finishes.
+    pub fn reenter_execute(e: Env, smart_account: Address, target: Address) {
+        let client = LatchSmartAccountClient::new(&e, &smart_account);
+        client.execute(&target, &Symbol::new(&e, "set"), &vec![&e, 99u32.into_val(&e)]);
+    }
+
+    /// Simulates a malicious factory/constructor callback that attempts to
+    /// re-enter the calling smart account's `deploy_contract` entrypoint.
+    pub fn reenter_deploy(e: Env, smart_account: Address, wasm_hash: BytesN<32>) {
+        let client = LatchSmartAccountClient::new(&e, &smart_account);
+        let salt = BytesN::from_array(&e, &[42u8; 32]);
+        client.deploy_contract(&wasm_hash, &salt, &vec![&e]);
+    }
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4002)")] // ReentrantCall
+fn deploy_contract_reentrancy_guard_blocks_malicious_constructor_reentering_execute() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let target_id = env.register(MockTargetContract, ());
+
+    // Simulate the state of the smart account mid-`deploy_contract` (when the
+    // Soroban host is invoking the newly deployed contract's constructor) and
+    // verify that a malicious constructor re-entering `execute` is rejected by
+    // the re-entrancy lock.
+    env.as_contract(&account_id, || {
+        super::acquire_reentrancy_lock(&env);
+    });
+
+    client.execute(&target_id, &Symbol::new(&env, "set"), &vec![&env, 99u32.into_val(&env)]);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4002)")] // ReentrantCall
+fn deploy_contract_reentrancy_guard_blocks_nested_deploy_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let wasm_hash = deployed_wasm_hash(&env);
+    let salt = BytesN::from_array(&env, &[11u8; 32]);
+
+    // Simulate a malicious constructor callback attempting to invoke
+    // `deploy_contract` recursively while the outer `deploy_contract` lock is
+    // held.
+    env.as_contract(&account_id, || {
+        super::acquire_reentrancy_lock(&env);
+    });
+
+    client.deploy_contract(&wasm_hash, &salt, &vec![&env]);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4002)")] // ReentrantCall
+fn execute_reentrancy_guard_blocks_malicious_factory_reentering_execute() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let target_id = env.register(MockTargetContract, ());
+    let malicious_factory_id = env.register(MockMaliciousFactoryContract, ());
+
+    client.execute(
+        &malicious_factory_id,
+        &Symbol::new(&env, "reenter_execute"),
+        &vec![&env, account_id.into_val(&env), target_id.into_val(&env)],
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4002)")] // ReentrantCall
+fn execute_reentrancy_guard_blocks_malicious_factory_reentering_deploy_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let wasm_hash = deployed_wasm_hash(&env);
+    let malicious_factory_id = env.register(MockMaliciousFactoryContract, ());
+
+    client.execute(
+        &malicious_factory_id,
+        &Symbol::new(&env, "reenter_deploy"),
+        &vec![&env, account_id.into_val(&env), wasm_hash.into_val(&env)],
+    );
+}
+
+#[test]
+fn deploy_contract_releases_reentrancy_lock_allowing_subsequent_execute() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let wasm_hash = deployed_wasm_hash(&env);
+    let salt = BytesN::from_array(&env, &[21u8; 32]);
+
+    let deployed = client.deploy_contract(&wasm_hash, &salt, &vec![&env]);
+    assert_eq!(client.get_deployed_contract_count(), 1);
+    assert_eq!(client.get_deployed_contract(&0).address, deployed);
+
+    let target_id = env.register(MockTargetContract, ());
+    let target_client = MockTargetContractClient::new(&env, &target_id);
+    client.execute(&target_id, &Symbol::new(&env, "set"), &vec![&env, 42u32.into_val(&env)]);
+    assert_eq!(target_client.get(), 42);
+}
