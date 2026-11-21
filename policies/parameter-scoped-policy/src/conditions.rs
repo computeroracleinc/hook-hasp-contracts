@@ -241,6 +241,16 @@ pub fn enforce(
                 .unwrap_or_else(|| panic_with_error!(e, ParameterScopedError::MethodNotAllowed));
 
             for cond in fn_conditions.into_iter() {
+                // Boundary check first: a call carrying fewer arguments than
+                // the configured `arg_index` is a configuration mismatch, not
+                // an authorized call, so it fails with a contract error
+                // instead of indexing past the end of `args`.
+                if cond.arg_index >= args.len() {
+                    panic_with_error!(e, ParameterScopedError::ArgumentIndexOutOfBounds)
+                }
+
+                // `get` re-checks the bound and reports `None` for anything
+                // out of range, so no path here can trap in the host.
                 let actual_arg = args.get(cond.arg_index).unwrap_or_else(|| {
                     panic_with_error!(e, ParameterScopedError::ArgumentIndexOutOfBounds)
                 });

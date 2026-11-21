@@ -4,6 +4,19 @@
 //! recipient addresses. It is designed to be attached to a `CallContract`
 //! context rule, where it intercepts `transfer(from, to, amount)` calls
 //! and ensures the `to` address (the recipient) is in the allowlist.
+//!
+//! # Address sanitization
+//!
+//! Allowlists are configured through [`RecipientAllowlistPolicy::install`] and
+//! [`RecipientAllowlistPolicy::set_allowed_recipients`], both of which sanitize
+//! every address *before* it is written to storage: each entry is rendered back
+//! to its Stellar strkey form and must be a canonical, checksummed 56-character
+//! account (`G...`) or contract (`C...`) identifier. Anything else — a
+//! truncated or padded strkey, a non-base32 character, a muxed (`M...`),
+//! claimable-balance (`B...`) or liquidity-pool (`L...`) identifier, or a
+//! strkey whose CRC16 checksum does not verify — is rejected at configuration
+//! time with [`RecipientError::InvalidRecipientAddress`], so a malformed
+//! recipient can never end up in the stored allowlist.
 #![no_std]
 
 use soroban_sdk::{
@@ -86,6 +99,9 @@ pub enum RecipientError {
     AlreadyInstalled = 5,
     /// The call arguments could not be parsed to extract a recipient.
     InvalidTransferArgs = 6,
+    /// An allowlist entry is not a canonical, checksummed account (`G...`)
+    /// or contract (`C...`) strkey, so it cannot be used as a recipient.
+    InvalidRecipientAddress = 7,
 }
 
 /// Storage keys for recipient policy data.
@@ -104,6 +120,127 @@ pub const RECIPIENT_TTL_THRESHOLD: u32 = RECIPIENT_EXTEND_AMOUNT - DAY_IN_LEDGER
 /// Maximum number of allowed recipients per policy.
 /// Bounds the linear scan performed in `enforce` and the storage size.
 pub const MAX_ALLOWED_RECIPIENTS: u32 = 10;
+
+// ################## ADDRESS VALIDATION ##################
+
+/// Encoded length, in base32 characters, of an account (`G...`) or contract
+/// (`C...`) strkey: 1 version byte + 32 payload bytes + 2 checksum bytes =
+/// 35 raw bytes, which base32-encodes (unpadded) to exactly 56 characters.
+const STRKEY_ENCODED_LEN: usize = 56;
+
+/// Raw length of a decoded strkey: version byte, 32-byte payload and the
+/// 2-byte checksum.
+const STRKEY_DECODED_LEN: usize = 35;
+
+/// Number of leading bytes covered by the strkey checksum (version byte plus
+/// the 32-byte payload).
+const STRKEY_CHECKSUMMED_LEN: usize = 33;
+
+/// RFC 4648 base32 alphabet used by Stellar strkeys.
+const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+/// CRC16-XModem (polynomial `0x1021`, initial value `0x0000`) — the checksum
+/// Stellar appends to every strkey.
+fn crc16_xmodem(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for &byte in data {
+        crc ^= u16::from(byte) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
+        }
+    }
+    crc
+}
+
+/// Decodes RFC 4648 base32 into `out`. Returns `false` when `encoded`
+/// contains a character outside the alphabet, or when it does not decode to
+/// exactly `out.len()` bytes with no leftover bits.
+fn decode_base32(encoded: &[u8], out: &mut [u8]) -> bool {
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut written: usize = 0;
+
+    for &ch in encoded {
+        let Some(value) = BASE32_ALPHABET.iter().position(|&c| c == ch) else {
+            return false;
+        };
+        buffer = (buffer << 5) | value as u32;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            if written >= out.len() {
+                return false;
+            }
+            out[written] = ((buffer >> bits) & 0xff) as u8;
+            written += 1;
+            buffer &= (1 << bits) - 1;
+        }
+    }
+
+    written == out.len() && bits == 0 && buffer == 0
+}
+
+/// Returns `true` when `encoded` is a canonical, checksummed account
+/// (`G...`) or contract (`C...`) strkey.
+fn is_valid_address_strkey(encoded: &[u8]) -> bool {
+    if encoded.len() != STRKEY_ENCODED_LEN {
+        return false;
+    }
+
+    // Only account (`G`, version byte `0x30`) and contract (`C`, version byte
+    // `0x10`) identifiers are valid recipients; muxed (`M`), claimable
+    // balance (`B`), liquidity pool (`L`) and every other identifier are not
+    // plain account/contract ids and are rejected up front.
+    if encoded[0] != b'G' && encoded[0] != b'C' {
+        return false;
+    }
+
+    let mut decoded = [0u8; STRKEY_DECODED_LEN];
+    if !decode_base32(encoded, &mut decoded) {
+        return false;
+    }
+
+    // The version byte must be the canonical zero-padded form of the `G`/`C`
+    // prefix: the low three bits come from the second base32 character and
+    // have to be zero for a well-formed strkey.
+    if decoded[0] & 0x07 != 0 {
+        return false;
+    }
+
+    let checksum = crc16_xmodem(&decoded[..STRKEY_CHECKSUMMED_LEN]);
+    // Stellar stores the checksum little-endian, low byte first.
+    decoded[STRKEY_CHECKSUMMED_LEN] == (checksum & 0xff) as u8
+        && decoded[STRKEY_CHECKSUMMED_LEN + 1] == (checksum >> 8) as u8
+}
+
+/// Sanitizes a single allowlist entry by rendering it back to its strkey
+/// form and requiring a canonical, checksummed account or contract
+/// identifier. Runs at configuration time, so a malformed address never
+/// reaches storage.
+fn validate_recipient_address(address: &Address) -> Result<(), RecipientError> {
+    let encoded = address.to_string().to_bytes();
+    if encoded.len() as usize != STRKEY_ENCODED_LEN {
+        return Err(RecipientError::InvalidRecipientAddress);
+    }
+
+    let mut buf = [0u8; STRKEY_ENCODED_LEN];
+    encoded.copy_into_slice(&mut buf);
+
+    if is_valid_address_strkey(&buf) {
+        Ok(())
+    } else {
+        Err(RecipientError::InvalidRecipientAddress)
+    }
+}
+
+/// Sanitizes a whole allowlist, failing with
+/// [`RecipientError::InvalidRecipientAddress`] on the first malformed entry.
+fn validate_allowed_recipients(e: &Env, recipients: &Vec<Address>) {
+    for recipient in recipients.iter() {
+        validate_recipient_address(&recipient)
+            .unwrap_or_else(|_| panic_with_error!(e, RecipientError::InvalidRecipientAddress));
+    }
+}
 
 // ################## HELPER ##################
 fn emit_recipient_enforced(
@@ -231,6 +368,8 @@ impl Policy for RecipientAllowlistPolicy {
     ///   type is not `CallContract`.
     /// * [`RecipientError::InvalidAllowedRecipients`] - When
     ///   `allowed_recipients` is empty or exceeds `MAX_ALLOWED_RECIPIENTS`.
+    /// * [`RecipientError::InvalidRecipientAddress`] - When an entry is not a
+    ///   canonical, checksummed account or contract strkey.
     /// * [`RecipientError::AlreadyInstalled`] - When the policy was already
     ///   installed for this smart account and context rule.
     ///
@@ -256,6 +395,10 @@ impl Policy for RecipientAllowlistPolicy {
         {
             panic_with_error!(e, RecipientError::InvalidAllowedRecipients)
         }
+
+        // Sanitize every entry before it is written to storage, so a
+        // malformed address is rejected at configuration time.
+        validate_allowed_recipients(e, &params.allowed_recipients);
 
         let key = RecipientStorageKey::AccountContext(smart_account.clone(), context_rule.id);
 
@@ -356,6 +499,8 @@ impl RecipientAllowlistPolicy {
     ///   installed for the given smart account and context rule.
     /// * [`RecipientError::InvalidAllowedRecipients`] - When
     ///   `allowed_recipients` is empty or exceeds `MAX_ALLOWED_RECIPIENTS`.
+    /// * [`RecipientError::InvalidRecipientAddress`] - When an entry is not a
+    ///   canonical, checksummed account or contract strkey.
     pub fn set_allowed_recipients(
         e: Env,
         allowed_recipients: Vec<Address>,
@@ -367,6 +512,10 @@ impl RecipientAllowlistPolicy {
         if allowed_recipients.is_empty() || allowed_recipients.len() > MAX_ALLOWED_RECIPIENTS {
             panic_with_error!(&e, RecipientError::InvalidAllowedRecipients)
         }
+
+        // Same sanitization as `install`: a malformed address is rejected
+        // before anything is written to storage.
+        validate_allowed_recipients(&e, &allowed_recipients);
 
         let key = RecipientStorageKey::AccountContext(smart_account.clone(), context_rule_id);
 
