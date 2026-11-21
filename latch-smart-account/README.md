@@ -28,6 +28,15 @@ Creates a single `Default` context rule named `"default"` with the provided sign
 fn batch_add_signer(env: &Env, context_rule_id: u32, signers: Vec<Signer>)
 ```
 
+**Timelocked Signer Rotation Queue** — provides protection against compromised keys by enforcing a configurable timelock delay on signer additions and removals, with a cancellation mechanism for disputed proposals:
+- `set_signer_timelock_delay(env: &Env, delay: u64)`: Configure the required timelock delay (in seconds). Requires self-auth.
+- `get_signer_timelock_delay(env: &Env) -> u64`: Query the current timelock delay.
+- `propose_signer(env: &Env, context_rule_id: u32, action: SignerAction) -> u32`: Queue a signer proposal (`SignerAction::Add(Signer)` or `SignerAction::Remove(u32)`). Requires self-auth.
+- `accept_signer(env: &Env, proposal_id: u32)`: Execute a pending proposal after the timelock delay has elapsed. Requires self-auth.
+- `cancel_signer_proposal(env: &Env, proposal_id: u32)`: Cancel a pending proposal in case of dispute. Requires self-auth.
+- `get_signer_proposal(env: &Env, proposal_id: u32) -> SignerProposal`: Fetch proposal details.
+- `get_signer_proposal_count(env: &Env) -> u32`: Get the total count of proposals created.
+
 **`upgrade`** — replaces the account's own WASM in place, preserving storage. Requires self-auth — gated by `e.current_contract_address().require_auth()`, the same as every other mutation here. No external admin involved. See [`UPGRADE_PATH.md`](../docs/UPGRADE_PATH.md) for the full reasoning.
 ```rust
 fn upgrade(env: &Env, new_wasm_hash: BytesN<32>, operator: Address)

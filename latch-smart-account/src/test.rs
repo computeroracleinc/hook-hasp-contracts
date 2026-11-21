@@ -17,7 +17,9 @@ use stellar_accounts::{
     smart_account::{self as smart_account, AuthPayload, ContextRuleType, Signer},
 };
 
-use super::{LatchSmartAccount, LatchSmartAccountClient};
+use super::{
+    LatchSmartAccount, LatchSmartAccountClient, ProposalStatus, SignerAction, SignerProposal,
+};
 
 // A real, tiny, already-existing no-op contract (zero-arg constructor),
 // reused from `factory-contract`'s own testdata rather than building a new
@@ -732,4 +734,197 @@ fn create_contract_rule_rejects_non_matching_signer() {
     env.as_contract(&account_id, || {
         let _ = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
     });
+}
+
+#[test]
+fn signer_timelock_delay_configuration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    // Initial delay should default to 0
+    assert_eq!(client.get_signer_timelock_delay(), 0);
+
+    // Update delay
+    let delay_seconds: u64 = 86400; // 1 day
+    client.set_signer_timelock_delay(&delay_seconds);
+    assert_eq!(client.get_signer_timelock_delay(), delay_seconds);
+}
+
+#[test]
+#[should_panic]
+fn set_signer_timelock_delay_requires_self_auth() {
+    let env = Env::default();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    client.set_signer_timelock_delay(&3600);
+}
+
+#[test]
+fn propose_and_accept_signer_add_with_timelock() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let default_rule = client.get_context_rule(&0);
+    let delay: u64 = 3600;
+    client.set_signer_timelock_delay(&delay);
+
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let proposal_id = client.propose_signer(&default_rule.id, &SignerAction::Add(new_signer.clone()));
+    assert_eq!(proposal_id, 0);
+    assert_eq!(client.get_signer_proposal_count(), 1);
+
+    let proposal = client.get_signer_proposal(&proposal_id);
+    assert_eq!(proposal.id, 0);
+    assert_eq!(proposal.context_rule_id, default_rule.id);
+    assert_eq!(proposal.status, ProposalStatus::Pending);
+    assert_eq!(proposal.eta, env.ledger().timestamp() + delay);
+
+    // Fast-forward timestamp past eta
+    env.ledger().set_timestamp(proposal.eta);
+
+    // Accept signer proposal
+    client.accept_signer(&proposal_id);
+
+    let executed_proposal = client.get_signer_proposal(&proposal_id);
+    assert_eq!(executed_proposal.status, ProposalStatus::Executed);
+
+    let updated_rule = client.get_context_rule(&default_rule.id);
+    assert!(updated_rule.signers.contains(&new_signer));
+}
+
+#[test]
+fn propose_and_accept_signer_remove_with_timelock() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let initial_signer = Signer::Delegated(Address::generate(&env));
+    let second_signer = Signer::Delegated(Address::generate(&env));
+    let signers = vec![&env, initial_signer.clone(), second_signer.clone()];
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let default_rule = client.get_context_rule(&0);
+    let delay: u64 = 7200;
+    client.set_signer_timelock_delay(&delay);
+
+    let signer_id_to_remove = 1;
+    let proposal_id = client.propose_signer(
+        &default_rule.id,
+        &SignerAction::Remove(signer_id_to_remove),
+    );
+
+    let proposal = client.get_signer_proposal(&proposal_id);
+    assert_eq!(proposal.status, ProposalStatus::Pending);
+
+    // Advance time to eta
+    env.ledger().set_timestamp(proposal.eta);
+
+    // Accept removal
+    client.accept_signer(&proposal_id);
+
+    let updated_rule = client.get_context_rule(&default_rule.id);
+    assert_eq!(updated_rule.signers.len(), 1);
+    assert!(updated_rule.signers.contains(&initial_signer));
+    assert!(!updated_rule.signers.contains(&second_signer));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4004)")] // TimelockNotExpired
+fn accept_signer_before_timelock_expires_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let default_rule = client.get_context_rule(&0);
+    let delay: u64 = 1000;
+    client.set_signer_timelock_delay(&delay);
+
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let proposal_id = client.propose_signer(&default_rule.id, &SignerAction::Add(new_signer));
+
+    // Do not advance time, timestamp < eta
+    client.accept_signer(&proposal_id);
+}
+
+#[test]
+fn cancel_pending_signer_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let default_rule = client.get_context_rule(&0);
+    let delay: u64 = 1000;
+    client.set_signer_timelock_delay(&delay);
+
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let proposal_id = client.propose_signer(&default_rule.id, &SignerAction::Add(new_signer.clone()));
+
+    // Cancel proposal before execution
+    client.cancel_signer_proposal(&proposal_id);
+
+    let proposal = client.get_signer_proposal(&proposal_id);
+    assert_eq!(proposal.status, ProposalStatus::Cancelled);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4003)")] // ProposalNotPending
+fn cannot_accept_cancelled_signer_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let default_rule = client.get_context_rule(&0);
+    let delay: u64 = 1000;
+    client.set_signer_timelock_delay(&delay);
+
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let proposal_id = client.propose_signer(&default_rule.id, &SignerAction::Add(new_signer));
+
+    client.cancel_signer_proposal(&proposal_id);
+    env.ledger().set_timestamp(env.ledger().timestamp() + delay + 10);
+    client.accept_signer(&proposal_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4003)")] // ProposalNotPending
+fn cannot_cancel_already_executed_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let default_rule = client.get_context_rule(&0);
+    let delay: u64 = 500;
+    client.set_signer_timelock_delay(&delay);
+
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let proposal_id = client.propose_signer(&default_rule.id, &SignerAction::Add(new_signer));
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + delay);
+    client.accept_signer(&proposal_id);
+
+    // Attempting to cancel already executed proposal
+    client.cancel_signer_proposal(&proposal_id);
 }
