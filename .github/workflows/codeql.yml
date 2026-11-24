@@ -7,6 +7,7 @@ on:
     branches: [ "main", "experimental" ]
   schedule:
     - cron: "30 6 * * 1"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -29,8 +30,10 @@ jobs:
         include:
           - language: actions
             build-mode: none
+            queries: security-extended
           - language: rust
             build-mode: none
+            queries: security-extended
 
     steps:
       - name: Checkout repository
@@ -41,6 +44,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
+          queries: ${{ matrix.queries }}
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@52cf1852265d99e9bea071b03366fc777a602909 # codeql-bundle-v2.27.4

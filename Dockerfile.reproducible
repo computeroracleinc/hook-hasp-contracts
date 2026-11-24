@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1
+# Pinned deterministic Docker environment for reproducible Soroban WASM contract compilation.
+# Stellar CLI: 27.1.0
+# Rust Toolchain: 1.84.0 (official rust slim-bookworm base) with target wasm32v1-none
+
+FROM rust:1.84.0-slim-bookworm AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add wasm32v1-none target and standard Rust components (no curl | sh needed)
+RUN rustup target add wasm32v1-none \
+    && rustup component add rustfmt clippy
+
+# Install stellar-cli pinned to 27.1.0 from crates.io with --locked
+ARG STELLAR_CLI_VERSION=27.1.0
+RUN cargo install --locked stellar-cli --version "${STELLAR_CLI_VERSION}"
+
+WORKDIR /workspace
+
+# Copy workspace source files
+COPY . .
+
+# Set reproducible environment variables
+ENV SOURCE_DATE_EPOCH=1725364800
+ENV CARGO_TERM_COLOR=always
+
+# Build contracts using release profile and optimize
+ENTRYPOINT ["stellar", "contract", "build"]

@@ -164,19 +164,28 @@ ACCOUNT_URL="$HORIZON_URL/accounts/$TREASURY_ADDRESS"
 
 log "Querying Horizon: $ACCOUNT_URL"
 
-HTTP_RESPONSE="$(curl --silent --fail --max-time 15 \
+HTTP_RAW="$(curl --silent --max-time 15 \
     --header "Accept: application/json" \
+    --write-out "\n%{http_code}" \
     "$ACCOUNT_URL" 2>&1)" || {
     EXIT=$?
-    # 404 = account does not exist yet (unfunded).
-    if echo "$HTTP_RESPONSE" | grep -q '"status":404'; then
-        log "WARNING: Account $TREASURY_ADDRESS not found on $NETWORK (unfunded?). Treating balance as 0."
-        BALANCE_STROOPS=0
-    else
-        log "ERROR: Failed to reach Horizon at $ACCOUNT_URL (curl exit $EXIT)."
-        exit 3
-    fi
+    log "ERROR: Failed to reach Horizon at $ACCOUNT_URL (curl exit $EXIT)."
+    exit 3
 }
+
+HTTP_CODE="${HTTP_RAW##*$'\n'}"
+HTTP_RESPONSE="${HTTP_RAW%$'\n'*}"
+
+if [[ "$HTTP_CODE" == "404" ]]; then
+    log "WARNING: Account $TREASURY_ADDRESS not found on $NETWORK (unfunded?). Treating balance as 0."
+    BALANCE_STROOPS=0
+elif [[ "$HTTP_CODE" =~ ^[0-9]+$ && "$HTTP_CODE" -ge 400 ]]; then
+    log "ERROR: Horizon returned HTTP $HTTP_CODE for $ACCOUNT_URL."
+    exit 3
+elif [[ ! "$HTTP_CODE" =~ ^[0-9]+$ ]]; then
+    # Mock curl scripts in offline tests output raw JSON without an HTTP status line.
+    HTTP_RESPONSE="$HTTP_RAW"
+fi
 
 if [[ -z "${BALANCE_STROOPS+x}" ]]; then
     # Parse the native XLM balance from the balances array.
@@ -188,8 +197,11 @@ if [[ -z "${BALANCE_STROOPS+x}" ]]; then
         BALANCE_XLM="0"
     fi
 
-    # Convert XLM string (e.g. "9.9999900") to stroops (integer).
-    BALANCE_STROOPS="$(awk "BEGIN { printf \"%d\", $BALANCE_XLM * 10000000 }")"
+    # Strictly validate numeric format before passing to awk (prevents command injection).
+    [[ "$BALANCE_XLM" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "Invalid native balance format from Horizon: $BALANCE_XLM" 3
+
+    # Convert XLM string (e.g. "9.9999900") to stroops (integer) safely via -v.
+    BALANCE_STROOPS="$(awk -v bal="$BALANCE_XLM" 'BEGIN { printf "%.0f", bal * 10000000 }')"
 fi
 
 BALANCE_XLM_DISPLAY="$(stroops_to_xlm "$BALANCE_STROOPS")"
