@@ -29,7 +29,7 @@ Tracking known gaps and follow-ups.
       this rather than inventing a threshold that isn't enforced. Decide
       later whether it's worth adding.
 
-## CI
+## CI & Supply Chain Security
 
 - [x] **Pin all GitHub Actions to exact full-length commit SHAs.** Tag hijacking prevention:
       all actions across `.github/workflows/` (`codeql.yml`, `rust.yml`, `security-malware.yml`,
@@ -39,6 +39,13 @@ Tracking known gaps and follow-ups.
       PRs introducing dependencies with moderate or higher security advisories or non-compliant
       licenses are blocked in CI via `actions/dependency-review-action` (`fail-on-severity: moderate`)
       in `.github/workflows/security-malware.yml`.
+- [x] **Add pre-commit and CI malware scanner checking for committed native binaries (#92).**
+      Integrated `scripts/security_malware_check.sh` and adversarial self-test suite
+      `scripts/test_security_malware_check.sh` into `.github/workflows/security-malware.yml`
+      and `.githooks/pre-commit` (via `scripts/install-hooks.sh`). Blocks unauthorized
+      native binaries (ELF, PE, Mach-O), disguised archives, unvetted WASM files,
+      build execution hooks, unsafe host FFI/process execution, obfuscated script droppers,
+      Trojan Source Unicode, rogue dependencies, unpinned GitHub Actions, and leaked secrets.
 - [x] **CI never verifies the WASM build actually succeeds.** Closed
       2026-09-02: `rust.yml` now has a `wasm-build` job that runs
       `stellar contract build` over the whole workspace (prebuilt stellar-cli

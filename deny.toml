@@ -20,7 +20,7 @@ version = 2
 confidence-threshold = 0.9
 # Internal workspace crates have publish = false and inherit the root MIT LICENSE.
 private = { ignore = true }
-# Strictly allow permissive OSS licenses; copyleft (GPL/AGPL/LGPL) is denied.
+# Strictly allow permissive OSS licenses (Apache-2.0 / MIT compatible); copyleft (GPL/AGPL/LGPL) is denied.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
