@@ -436,3 +436,154 @@ fn e2e_deploy_via_smart_account() {
     vault_client.withdraw(&token_id.address(), &10_000_000, &account_id);
     assert_eq!(vault_client.get_balance(&token_id.address()), 0);
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Adversarial Re-entrancy Attack Simulation (#82)
+// ────────────────────────────────────────────────────────────────────────────
+
+#[soroban_sdk::contracttype]
+pub enum ReentrantDataKey {
+    Vault,
+    Token,
+    Owner,
+    AttackAttempted,
+    AttackSucceeded,
+    WithdrawAmount,
+}
+
+#[soroban_sdk::contract]
+struct MaliciousReentrantToken;
+
+#[soroban_sdk::contractimpl]
+impl MaliciousReentrantToken {
+    pub fn init(
+        e: Env,
+        vault: Address,
+        owner: Address,
+        withdraw_amount: i128,
+    ) {
+        e.storage().persistent().set(&ReentrantDataKey::Vault, &vault);
+        e.storage().persistent().set(&ReentrantDataKey::Owner, &owner);
+        e.storage().persistent().set(&ReentrantDataKey::WithdrawAmount, &withdraw_amount);
+        e.storage().persistent().set(&ReentrantDataKey::AttackAttempted, &false);
+        e.storage().persistent().set(&ReentrantDataKey::AttackSucceeded, &false);
+    }
+
+    pub fn transfer(e: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+
+        let bal_from = Self::balance(e.clone(), from.clone());
+        if bal_from < amount {
+            panic!("insufficient balance");
+        }
+
+        // Deduct balance from sender first (standard state update before external call / callback)
+        e.storage().persistent().set(&from, &(bal_from - amount));
+        let bal_to = Self::balance(e.clone(), to.clone());
+        e.storage().persistent().set(&to, &(bal_to + amount));
+
+        let vault: Option<Address> = e.storage().persistent().get(&ReentrantDataKey::Vault);
+        if let Some(vault_addr) = vault {
+            // Trigger attack on withdrawal transfer out from the vault
+            if from == vault_addr {
+                let attempted: bool = e
+                    .storage()
+                    .persistent()
+                    .get(&ReentrantDataKey::AttackAttempted)
+                    .unwrap_or(false);
+
+                if !attempted {
+                    e.storage().persistent().set(&ReentrantDataKey::AttackAttempted, &true);
+
+                    let owner: Address =
+                        e.storage().persistent().get(&ReentrantDataKey::Owner).unwrap();
+                    let withdraw_amount: i128 = e
+                        .storage()
+                        .persistent()
+                        .get(&ReentrantDataKey::WithdrawAmount)
+                        .unwrap();
+                    let this_token = e.current_contract_address();
+
+                    // Adversarial simulation: attempt recursive re-entrant withdrawal back into timelock vault
+                    let client = TimelockVaultClient::new(&e, &vault_addr);
+                    let reentrant_res = client.try_withdraw(&this_token, &withdraw_amount, &owner);
+
+                    if reentrant_res.is_ok() {
+                        e.storage().persistent().set(&ReentrantDataKey::AttackSucceeded, &true);
+                    } else {
+                        // Re-entrancy attack was blocked (e.g. insufficient remaining balance or call trapped)
+                        e.storage().persistent().set(&ReentrantDataKey::AttackSucceeded, &false);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn mint(e: Env, to: Address, amount: i128) {
+        let balance = Self::balance(e.clone(), to.clone());
+        e.storage().persistent().set(&to, &(balance + amount));
+    }
+
+    pub fn balance(e: Env, account: Address) -> i128 {
+        e.storage().persistent().get(&account).unwrap_or(0)
+    }
+
+    pub fn attack_attempted(e: Env) -> bool {
+        e.storage().persistent().get(&ReentrantDataKey::AttackAttempted).unwrap_or(false)
+    }
+
+    pub fn attack_succeeded(e: Env) -> bool {
+        e.storage().persistent().get(&ReentrantDataKey::AttackSucceeded).unwrap_or(false)
+    }
+}
+
+#[test]
+fn adversarial_reentrancy_withdrawal_attack_fails() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    // Ledger sequence starts at 100, vault unlock ledger is at 1,000
+    e.ledger().with_mut(|li| {
+        li.sequence_number = 100;
+    });
+
+    let owner = Address::generate(&e);
+    let vault_id = e.register(TimelockVault, (&owner, UNLOCK_LEDGER));
+    let vault_client = TimelockVaultClient::new(&e, &vault_id);
+
+    // Deploy malicious token contract configured to re-enter vault upon withdrawal
+    let malicious_token_id = e.register(MaliciousReentrantToken, ());
+    let malicious_client = MaliciousReentrantTokenClient::new(&e, &malicious_token_id);
+
+    let initial_deposit = 10_000_000i128;
+    let withdraw_amount = 6_000_000i128;
+
+    malicious_client.init(&vault_id, &owner, &withdraw_amount);
+
+    // Mint tokens to owner and deposit into timelock vault
+    malicious_client.mint(&owner, &initial_deposit);
+    vault_client.deposit(&owner, &malicious_token_id, &initial_deposit);
+
+    assert_eq!(vault_client.get_balance(&malicious_token_id), initial_deposit);
+    assert_eq!(malicious_client.balance(&vault_id), initial_deposit);
+
+    // Advance ledger sequence past unlock point
+    e.ledger().with_mut(|li| {
+        li.sequence_number = UNLOCK_LEDGER + 1;
+    });
+
+    // Owner performs legitimate withdrawal
+    vault_client.withdraw(&malicious_token_id, &withdraw_amount, &owner);
+
+    // Verify the adversarial callback attempted re-entrancy
+    assert!(malicious_client.attack_attempted());
+    // Verify recursive re-entrant withdrawal failed
+    assert!(!malicious_client.attack_succeeded());
+
+    // Invariant: Balance remains strictly preserved and correct
+    let remaining_vault_balance = vault_client.get_balance(&malicious_token_id);
+    let expected_remaining = initial_deposit - withdraw_amount;
+    assert_eq!(remaining_vault_balance, expected_remaining);
+    assert_eq!(malicious_client.balance(&vault_id), expected_remaining);
+    assert_eq!(malicious_client.balance(&owner), withdraw_amount);
+}

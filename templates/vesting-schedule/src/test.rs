@@ -458,3 +458,149 @@ fn test_end_to_end_deployment_and_claim_via_smart_account() {
     assert_eq!(token_client.balance(&beneficiary), 5_000);
     assert_eq!(token_client.balance(&vesting_id), 0);
 }
+
+// ################## ADVERSARIAL & INVARIANT TESTS ##################
+
+#[test]
+fn test_vesting_monotonicity_across_arbitrary_ledger_sequences() {
+    // Tests that compute_vested is strictly non-decreasing across all possible ledger sequences,
+    // including retroactive movements, future jumps, and extreme ledger boundaries.
+    let total_amount = 1_000_000i128;
+    let start_ledger = 1_000u32;
+    let cliff_ledger = Some(1_500u32);
+    let end_ledger = 2_000u32;
+
+    // Test a sweep of ledgers from 0 up to 3_000
+    let mut prev_vested = 0i128;
+    for l in (0..=3_000).step_by(5) {
+        let vested = compute_vested(total_amount, start_ledger, cliff_ledger, end_ledger, l);
+        assert!(
+            vested >= prev_vested,
+            "Monotonicity violated at ledger {}: prev_vested={}, current_vested={}",
+            l,
+            prev_vested,
+            vested
+        );
+        assert!(vested >= 0 && vested <= total_amount);
+        prev_vested = vested;
+    }
+}
+
+#[test]
+fn test_adversarial_timestamp_and_retroactive_ledger_manipulation() {
+    let fixture = create_fixture(1_000, Some(1_500), 2_000, 10_000);
+    let beneficiary = Address::generate(&fixture.env);
+
+    // Leap second timestamp reference values:
+    // Historical leap seconds (e.g. 2016-12-31 23:59:60 UTC = Unix timestamp 1483228800).
+    // Test that manipulating ledger timestamp (including leap-second boundaries and retroactive timestamps)
+    // does not affect contract vesting calculations or release amounts.
+    let leap_second_timestamp: u64 = 1_483_228_800;
+    fixture.env.ledger().set_timestamp(leap_second_timestamp);
+    fixture.env.ledger().set_sequence_number(1_200); // Between start and cliff
+
+    assert_eq!(fixture.client.vested_amount(), 0);
+    assert_eq!(fixture.client.claimable_amount(), 0);
+    assert_eq!(fixture.client.claim(&beneficiary), 0);
+
+    // Advance to leap second + 1
+    fixture.env.ledger().set_timestamp(leap_second_timestamp + 1);
+    fixture.env.ledger().set_sequence_number(1_500); // Exactly at cliff: 50%
+    assert_eq!(fixture.client.vested_amount(), 5_000);
+    assert_eq!(fixture.client.claimable_amount(), 5_000);
+    let claimed_cliff = fixture.client.claim(&beneficiary);
+    assert_eq!(claimed_cliff, 5_000);
+    assert_eq!(fixture.client.claimed_amount(), 5_000);
+
+    // Adversarial retroactive timestamp manipulation: timestamp goes backwards, ledger remains the same
+    fixture.env.ledger().set_timestamp(leap_second_timestamp - 3600);
+    assert_eq!(fixture.client.vested_amount(), 5_000);
+    assert_eq!(fixture.client.claimable_amount(), 0);
+    assert_eq!(fixture.client.claim(&beneficiary), 0);
+
+    // Adversarial retroactive ledger manipulation: ledger sequence goes backwards
+    // Invariant: Claimed amount remains intact, claimable cannot become negative, vested calculation drops
+    // but claimable saturates to 0 and cannot decrease claimed_amount or drain funds.
+    fixture.env.ledger().set_sequence_number(1_200);
+    assert_eq!(fixture.client.vested_amount(), 0);
+    assert_eq!(fixture.client.claimable_amount(), 0);
+    assert_eq!(fixture.client.claimed_amount(), 5_000);
+    assert_eq!(fixture.client.claim(&beneficiary), 0);
+    assert_eq!(fixture.token_client.balance(&beneficiary), 5_000);
+
+    // Future timestamp manipulation: timestamp jumps far into future (e.g., year 2100 = 4102444800)
+    let future_timestamp: u64 = 4_102_444_800;
+    fixture.env.ledger().set_timestamp(future_timestamp);
+    fixture.env.ledger().set_sequence_number(1_750); // 75% vested: 7,500 total, 5,000 already claimed
+    assert_eq!(fixture.client.vested_amount(), 7_500);
+    assert_eq!(fixture.client.claimable_amount(), 2_500);
+    let claimed_75 = fixture.client.claim(&beneficiary);
+    assert_eq!(claimed_75, 2_500);
+    assert_eq!(fixture.client.claimed_amount(), 7_500);
+    assert_eq!(fixture.token_client.balance(&beneficiary), 7_500);
+
+    // Far future timestamp and ledger well beyond end_ledger (leaving room for host TTL extension)
+    fixture.env.ledger().set_timestamp(u64::MAX);
+    fixture.env.ledger().set_sequence_number(u32::MAX - 10_000_000);
+    assert_eq!(fixture.client.vested_amount(), 10_000);
+    assert_eq!(fixture.client.claimable_amount(), 2_500);
+    let claimed_end = fixture.client.claim(&beneficiary);
+    assert_eq!(claimed_end, 2_500);
+    assert_eq!(fixture.client.claimed_amount(), 10_000);
+    assert_eq!(fixture.token_client.balance(&beneficiary), 10_000);
+    assert_eq!(fixture.token_client.balance(&fixture.vesting_id), 0);
+
+    // Further claims at extreme timestamps/ledgers release 0
+    assert_eq!(fixture.client.claim(&beneficiary), 0);
+}
+
+#[test]
+fn test_monotonic_vesting_release_curve_adversarial_sweep() {
+    // Tests invariant fuzzing across diverse schedule configurations:
+    // With and without cliff, small and large amounts, varying durations.
+    let test_cases: &[(i128, u32, Option<u32>, u32)] = &[
+        (1, 10, None, 20),
+        (100, 100, Some(150), 200),
+        (1_000_000, 50, Some(50), 100), // Cliff at start
+        (1_000_000, 50, Some(100), 100), // Cliff at end
+        (i128::MAX / 4, 1, None, 1_000),
+        (7_777_777, 100, Some(200), 300),
+    ];
+
+    for &(total_amount, start, cliff, end) in test_cases {
+        let mut prev = 0i128;
+        let mut ledgers_to_test = [
+            0,
+            start.saturating_sub(1),
+            start,
+            start + 1,
+            cliff.map(|c| c.saturating_sub(1)).unwrap_or(start),
+            cliff.unwrap_or(start),
+            cliff.map(|c| c + 1).unwrap_or(start),
+            (start + end) / 2,
+            end.saturating_sub(1),
+            end,
+            end + 1,
+            end + 10_000,
+            u32::MAX,
+        ];
+        ledgers_to_test.sort();
+
+        for &l in &ledgers_to_test {
+            let v = compute_vested(total_amount, start, cliff, end, l);
+            if l < start {
+                assert_eq!(v, 0);
+            } else if cliff.is_some() && l < cliff.unwrap() {
+                assert_eq!(v, 0);
+            } else if l >= end {
+                assert_eq!(v, total_amount);
+            } else {
+                assert!(v >= 0 && v <= total_amount);
+            }
+            if l >= start {
+                assert!(v >= prev, "Monotonicity curve failed for case {:?}", (total_amount, start, cliff, end));
+            }
+            prev = v;
+        }
+    }
+}

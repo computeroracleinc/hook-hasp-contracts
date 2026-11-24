@@ -159,3 +159,6 @@ mod test;
 
 #[cfg(test)]
 mod boundary_test;
+
+#[cfg(test)]
+mod fuzz_test;

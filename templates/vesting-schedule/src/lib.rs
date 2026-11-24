@@ -249,7 +249,7 @@ impl VestingScheduleContract {
             current_ledger,
         );
 
-        let claimable = vested.saturating_sub(schedule.claimed_amount);
+        let claimable = vested.saturating_sub(schedule.claimed_amount).max(0);
         if claimable > 0 {
             schedule.claimed_amount =
                 schedule.claimed_amount.checked_add(claimable).unwrap_or(schedule.total_amount);
@@ -299,7 +299,7 @@ impl VestingScheduleContract {
             schedule.end_ledger,
             e.ledger().sequence(),
         );
-        vested.saturating_sub(schedule.claimed_amount)
+        vested.saturating_sub(schedule.claimed_amount).max(0)
     }
 
     /// Returns the cumulative amount claimed so far.

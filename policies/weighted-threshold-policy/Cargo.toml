@@ -15,3 +15,5 @@ stellar-accounts = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 stellar-accounts = { workspace = true }
+proptest = { workspace = true }
+rand = "0.8"
