@@ -260,7 +260,66 @@ impl FeeForwarder {
     /// * [`stellar_access::access_control::AccessControlError::Unauthorized`] - If `operator` lacks `manager` role.
     #[only_role(operator, "manager")]
     pub fn sweep_tokens(e: &Env, token: Address, recipient: Address, operator: Address) -> i128 {
-        sweep_token(e, &token, &recipient)
+        let destination = e
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::Treasury)
+            .unwrap_or(recipient);
+        sweep_token(e, &token, &destination)
+    }
+
+    // ── Treasury timelock ────────────────────────────────────────────────────
+
+    /// Proposes a new treasury address. The change becomes eligible for
+    /// execution after `TREASURY_TIMELOCK_LEDGERS` ledgers. Manager-gated.
+    ///
+    /// Any previously pending (unexecuted) proposal is overwritten.
+    #[only_role(operator, "manager")]
+    pub fn propose_treasury(e: &Env, new_treasury: Address, operator: Address) {
+        let eligible_ledger = e.ledger().sequence() + TREASURY_TIMELOCK_LEDGERS;
+        e.storage().instance().set(
+            &DataKey::PendingTreasury,
+            &TreasuryProposal { new_treasury, eligible_ledger },
+        );
+    }
+
+    /// Executes a pending treasury proposal, activating the new treasury
+    /// address. Reverts if no proposal exists or the timelock delay has not
+    /// yet elapsed. Manager-gated.
+    #[only_role(operator, "manager")]
+    pub fn execute_treasury_change(e: &Env, operator: Address) {
+        let proposal = e
+            .storage()
+            .instance()
+            .get::<DataKey, TreasuryProposal>(&DataKey::PendingTreasury)
+            .unwrap_or_else(|| panic!("no pending treasury proposal"));
+
+        if e.ledger().sequence() < proposal.eligible_ledger {
+            panic!("treasury timelock has not elapsed");
+        }
+
+        e.storage().instance().set(&DataKey::Treasury, &proposal.new_treasury);
+        e.storage().instance().remove(&DataKey::PendingTreasury);
+    }
+
+    /// Cancels a pending treasury proposal without executing it. Manager-gated.
+    /// Reverts if no proposal exists.
+    #[only_role(operator, "manager")]
+    pub fn cancel_treasury_change(e: &Env, operator: Address) {
+        if !e.storage().instance().has(&DataKey::PendingTreasury) {
+            panic!("no pending treasury proposal");
+        }
+        e.storage().instance().remove(&DataKey::PendingTreasury);
+    }
+
+    /// Returns the pending treasury proposal, if any.
+    pub fn get_pending_treasury(e: &Env) -> Option<TreasuryProposal> {
+        e.storage().instance().get(&DataKey::PendingTreasury)
+    }
+
+    /// Returns the active treasury address, if one has been set.
+    pub fn get_treasury(e: &Env) -> Option<Address> {
+        e.storage().instance().get(&DataKey::Treasury)
     }
 }
 
