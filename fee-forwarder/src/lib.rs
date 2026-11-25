@@ -128,6 +128,62 @@ impl FeeForwarder {
         e.storage().instance().set(&FeeForwarderStorageKey::FeeCap, &fee_cap);
     }
 
+    // ── Circuit-breaker management ────────────────────────────────────────
+
+    /// Sets the per-token emergency budget (maximum aggregate outflow within
+    /// any rolling 1-hour window). Manager-gated.
+    ///
+    /// Once set, every successful `forward` for `token` accumulates toward
+    /// this cap. When the running total exceeds `budget` the circuit breaker
+    /// trips, all further `forward` calls for that token revert with
+    /// [`FeeForwarderError::CircuitBreakerTripped`], and the manager must
+    /// call [`reset_circuit_breaker`] to resume.
+    ///
+    /// # Errors
+    ///
+    /// * [`FeeForwarderError::InvalidBudget`] - If `budget` is not strictly
+    ///   positive.
+    #[only_role(operator, "manager")]
+    pub fn set_emergency_budget(e: &Env, token: Address, budget: i128, operator: Address) {
+        if budget <= 0 {
+            panic_with_error!(e, FeeForwarderError::InvalidBudget);
+        }
+        e.storage()
+            .instance()
+            .set(&FeeForwarderStorageKey::EmergencyBudget(token), &budget);
+    }
+
+    /// Clears the tripped state for `token`, re-enabling `forward` calls and
+    /// resetting the outflow window. Manager-gated.
+    #[only_role(operator, "manager")]
+    pub fn reset_circuit_breaker(e: &Env, token: Address, operator: Address) {
+        e.storage()
+            .instance()
+            .remove(&FeeForwarderStorageKey::CircuitBreakerPaused(token.clone()));
+        e.storage()
+            .instance()
+            .remove(&FeeForwarderStorageKey::HourlyOutflow(token.clone()));
+        CircuitBreakerReset { token }.publish(e);
+    }
+
+    /// Returns `true` if the circuit breaker is currently tripped for `token`.
+    pub fn get_circuit_breaker_paused(e: &Env, token: Address) -> bool {
+        e.storage()
+            .instance()
+            .get::<_, bool>(&FeeForwarderStorageKey::CircuitBreakerPaused(token))
+            .unwrap_or(false)
+    }
+
+    /// Returns the current rolling-window outflow data for `token`, or `None`
+    /// if no outflow has been recorded yet.
+    pub fn get_hourly_outflow(e: &Env, token: Address) -> Option<HourlyOutflowData> {
+        e.storage()
+            .instance()
+            .get(&FeeForwarderStorageKey::HourlyOutflow(token))
+    }
+
+    // ── Core forwarding ───────────────────────────────────────────────────
+
     /// Collects `fee_amount` of `fee_token` from `user` and forwards the
     /// call to `target_contract.target_fn(target_args)`, atomically.
     ///
@@ -206,7 +262,47 @@ impl FeeForwarder {
             &user,
             &e.current_contract_address(),
             FeeAbstractionApproval::Lazy,
-        )
+        );
+
+        // Update rolling outflow window and check the emergency budget (if
+        // one is configured for this token). The budget check runs after a
+        // successful fee collection so that the tripping transaction itself
+        // is still reverted — once the event fires and the panic runs, the
+        // whole invocation unwinds.
+        let budget_key = FeeForwarderStorageKey::EmergencyBudget(fee_token.clone());
+        if let Some(budget) = e.storage().instance().get::<_, i128>(&budget_key) {
+            let now = e.ledger().timestamp();
+            let outflow_key = FeeForwarderStorageKey::HourlyOutflow(fee_token.clone());
+
+            let mut outflow: HourlyOutflowData = e
+                .storage()
+                .instance()
+                .get(&outflow_key)
+                .unwrap_or(HourlyOutflowData { total_amount: 0, window_start: now });
+
+            // Roll the window forward if more than an hour has elapsed.
+            if now.saturating_sub(outflow.window_start) >= HOUR_IN_SECS {
+                outflow.total_amount = 0;
+                outflow.window_start = now;
+            }
+
+            outflow.total_amount = outflow.total_amount.saturating_add(fee_amount);
+            e.storage().instance().set(&outflow_key, &outflow);
+
+            if outflow.total_amount > budget {
+                // Trip the breaker so subsequent calls are rejected immediately.
+                e.storage().instance().set(&paused_key, &true);
+                CircuitBreakerTripped {
+                    token: fee_token,
+                    total_amount: outflow.total_amount,
+                    emergency_budget: budget,
+                }
+                .publish(e);
+                panic_with_error!(e, FeeForwarderError::CircuitBreakerTripped);
+            }
+        }
+
+        result
     }
 
     /// Adds `token` to the fee-token allowlist. Manager-gated.
