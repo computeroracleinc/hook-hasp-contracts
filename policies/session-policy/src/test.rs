@@ -755,3 +755,50 @@ fn uninstall_expired_session_does_not_brick_when_entry_is_absent() {
         uninstall(&e, &context_rule, &smart_account);
     });
 }
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams {
+            allowed_fns: vec![&e, symbol_short!("transfer")],
+        };
+        install(&e, &params, &context_rule, &smart_account);
+    });
+
+    let context = create_contract_context(&e, symbol_short!("transfer"));
+
+    // Reset budget before benchmarking session policy enforce under Host v22 parameters
+    e.cost_estimate().budget().reset_default();
+
+    e.as_contract(&address, || {
+        enforce(&e, &context, &context_rule.signers, &context_rule, &smart_account);
+    });
+
+    let cpu_cost = e.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = e.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
+}

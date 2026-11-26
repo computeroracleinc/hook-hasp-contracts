@@ -2989,3 +2989,49 @@ fn cancel_treasury_change_rejects_non_manager() {
     let not_manager = Address::generate(&e);
     s.fee_forwarder.cancel_treasury_change(&not_manager);
 }
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let s = setup(&e);
+
+    let target_args: Vec<Val> = Vec::new(&e);
+    let expiration_ledger = e.ledger().sequence() + 100;
+
+    // Reset budget before benchmarking forward invocation
+    e.cost_estimate().budget().reset_default();
+
+    s.fee_forwarder.forward(
+        &s.token.address,
+        &s.fee_amount,
+        &s.max_fee_amount,
+        &expiration_ledger,
+        &s.target.address,
+        &Symbol::new(&e, "greet"),
+        &target_args,
+        &s.user,
+        &s.relayer,
+    );
+
+    let cpu_cost = e.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = e.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
+}

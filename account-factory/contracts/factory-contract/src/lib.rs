@@ -40,6 +40,11 @@ pub struct FactoryConfig {
     pub ed25519_verifier: Address,
     pub webauthn_verifier: Address,
     pub threshold_policy: Address,
+    /// The approved default-token set for this factory, fixed at construction.
+    /// Every token a `create_account_with_tokens` request names must be in
+    /// this set, so a factory deployer can restrict the assets a default
+    /// account may be configured with to a pre-approved set.
+    pub approved_default_tokens: Vec<Address>,
 }
 
 #[contracttype]
@@ -91,6 +96,10 @@ pub enum FactoryError {
     InvalidEd25519Verifier = 10,
     InvalidWebAuthnVerifier = 12,
     InvalidThresholdPolicy = 13,
+    /// A token listed in `approved_default_tokens` is not a deployed contract.
+    InvalidApprovedToken = 14,
+    /// A requested default token is not in the factory's approved set.
+    TokenNotWhitelisted = 15,
 }
 
 #[contractevent]
@@ -116,6 +125,7 @@ impl Contract {
         ed25519_verifier: Address,
         webauthn_verifier: Address,
         threshold_policy: Address,
+        approved_default_tokens: Vec<Address>,
     ) {
         if env.storage().instance().has(&DataKey::Config) {
             panic_with_error!(&env, FactoryError::AlreadyInitialized);
@@ -123,12 +133,19 @@ impl Contract {
         validate_singleton_address(&env, &ed25519_verifier, FactoryError::InvalidEd25519Verifier);
         validate_singleton_address(&env, &webauthn_verifier, FactoryError::InvalidWebAuthnVerifier);
         validate_singleton_address(&env, &threshold_policy, FactoryError::InvalidThresholdPolicy);
+        // Every approved default token must itself be a deployed contract, so a
+        // bogus / phantom address can't be smuggled into the whitelist at
+        // factory-deploy time and later treated as an approved asset.
+        for token in approved_default_tokens.iter() {
+            validate_singleton_address(&env, &token, FactoryError::InvalidApprovedToken);
+        }
 
         let config = FactoryConfig {
             smart_account_wasm_hash,
             ed25519_verifier,
             webauthn_verifier,
             threshold_policy,
+            approved_default_tokens,
         };
         env.storage().instance().set(&DataKey::Config, &config);
         env.storage().instance().extend_ttl(100, 1_555_200);
@@ -189,7 +206,34 @@ impl Contract {
     /// * topics - `["account_created"]`
     /// * data - `[account: Address]`
     pub fn create_account(env: Env, params: AccountInitParams) -> Address {
+        let default_tokens = Vec::new(&env);
+        Self::create_account_with_tokens(env, params, default_tokens)
+    }
+
+    /// Creates a smart account, additionally enforcing the factory's
+    /// approved-token whitelist against `default_tokens`.
+    ///
+    /// Behaves exactly like [`create_account`](Self::create_account) —
+    /// deterministic, idempotent deployment at the precomputed address — but
+    /// unconditionally validates `default_tokens` against the factory's
+    /// `approved_default_tokens` set before returning (even if the account
+    /// was already deployed).
+    ///
+    /// `get_account_address` is unaffected: the account's address is derived
+    /// from its signers (and salt) alone, so `default_tokens` are a
+    /// creation-time policy enforced here, not part of the address identity.
+    ///
+    /// # Errors
+    ///
+    /// * [`FactoryError::TokenNotWhitelisted`] - When a requested default token
+    ///   is not in the factory's approved set.
+    pub fn create_account_with_tokens(
+        env: Env,
+        params: AccountInitParams,
+        default_tokens: Vec<Address>,
+    ) -> Address {
         let config = get_config(&env);
+        validate_default_tokens(&env, &default_tokens, &config.approved_default_tokens);
         let normalized = normalize_params(&env, params);
         let account_salt = compute_account_deploy_salt(&env, &normalized);
         let deployer = env.deployer().with_current_contract(account_salt);
@@ -284,6 +328,11 @@ impl Contract {
     /// * [`FactoryError::MissingConfig`] - If factory configuration is not initialized.
     pub fn get_threshold_policy(env: Env) -> Address {
         get_config(&env).threshold_policy
+    }
+
+    /// Returns the factory's approved default-token set.
+    pub fn get_approved_default_tokens(env: Env) -> Vec<Address> {
+        get_config(&env).approved_default_tokens
     }
 }
 
@@ -399,6 +448,18 @@ fn validate_signer_shape(env: &Env, signer: &AccountSignerInit) {
 fn validate_singleton_address(env: &Env, address: &Address, error: FactoryError) {
     if address.executable().is_none() {
         panic_with_error!(env, error);
+    }
+}
+
+/// Rejects `default_tokens` that are not in the factory's `approved` set, so
+/// an account cannot be configured with assets the factory deployer did not
+/// pre-approve. The approved set is itself validated at construction (every
+/// entry must be a deployed contract), so membership here is sufficient.
+fn validate_default_tokens(env: &Env, default_tokens: &Vec<Address>, approved: &Vec<Address>) {
+    for token in default_tokens.iter() {
+        if approved.first_index_of(token).is_none() {
+            panic_with_error!(env, FactoryError::TokenNotWhitelisted);
+        }
     }
 }
 

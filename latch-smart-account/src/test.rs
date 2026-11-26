@@ -2273,3 +2273,50 @@ fn cannot_cancel_already_executed_proposal() {
     client.accept_signer(&proposal_id);
     client.cancel_signer_proposal(&proposal_id);
 }
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let (account_id, _client) = register_account(&env, &signers, &Map::new(&env));
+
+    let context = Context::Contract(ContractContext {
+        contract: Address::generate(&env),
+        fn_name: Symbol::new(&env, "test"),
+        args: Vec::new(&env),
+    });
+    let auth_contexts = Vec::from_array(&env, [context]);
+    let signatures = create_signatures(&env, &signers, vec![&env, 0u32]);
+    let payload_hash = env.crypto().sha256(&Bytes::from_array(&env, &[1u8; 32]));
+
+    // Reset budget before benchmarking check_auth under Host v22 parameters
+    env.cost_estimate().budget().reset_default();
+
+    env.as_contract(&account_id, || {
+        let res = smart_account::do_check_auth(&env, &payload_hash, &signatures, &auth_contexts);
+        assert!(res.is_ok());
+    });
+
+    let cpu_cost = env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = env.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
+}

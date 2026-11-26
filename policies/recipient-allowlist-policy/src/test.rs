@@ -531,3 +531,48 @@ fn test_install_accepts_account_and_contract_recipients() {
 
     assert_eq!(client.get_allowed_recipients(&rule.id, &smart_account), allowed_recipients);
 }
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let (e, smart_account, client) = setup_env();
+    let rule = create_context_rule(&e);
+
+    let recipient = Address::generate(&e);
+    let allowed_recipients = vec![&e, recipient.clone()];
+    client.install(&RecipientAccountParams { allowed_recipients }, &rule, &smart_account);
+
+    let contract_target = Address::generate(&e);
+    let args: Vec<Val> =
+        vec![&e, smart_account.into_val(&e), recipient.into_val(&e), 100i128.into_val(&e)];
+    let context = Context::Contract(ContractContext {
+        contract: contract_target,
+        fn_name: Symbol::new(&e, "transfer"),
+        args,
+    });
+
+    // Reset budget before benchmarking recipient allowlist enforce under Host v22 parameters
+    e.cost_estimate().budget().reset_default();
+
+    client.enforce(&context, &rule.signers, &rule, &smart_account);
+
+    let cpu_cost = e.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = e.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
+}

@@ -194,13 +194,15 @@ crate is actually doing:
 ### Naming
 
 - **Errors**: `<Thing>Error`, `#[contracterror] #[derive(Copy, Clone, Debug,
-  Eq, PartialEq)] #[repr(u32)]`, PascalCase variants. Each crate is an
-  independently deployed contract, not a module of a shared library, so
-  numbering starts fresh at `1` per crate — there is no shared range to
-  respect (contrast with OZ, where e.g. `fungible` owns the 100s and
-  `access-control` the 2000s). `policies/session-policy/src/allowlist.rs`'s
-  `SessionError` doc comment states this explicitly; new crates should say
-  the same.
+  Eq, PartialEq)] #[repr(u32)]`, PascalCase variants. Existing deployed
+  contracts preserve their established error code numbers for ABI stability
+  (e.g., standalone crates starting at `1`, `latch-smart-account` extensions
+  starting at `4000` above OZ's `3000`s, `fee-forwarder` avoiding OZ's
+  `2000`s/`5000`s). Never renumber existing error codes in deployed contracts;
+  ensure new variants added to any contract never collide with existing or
+  inherited OpenZeppelin error discriminants. **(target, not yet universal)**
+  For brand-new multi-contract suites that share cross-contract error
+  namespaces, document non-overlapping category ranges up front.
 - **Events**: `#[contractevent]` struct, PascalCase, past-tense or noun
   (`SessionEnforced`, `AccountCreated`). `#[topic]` on the smart-account /
   identity field(s), appearing before non-topic fields. **(target, not yet

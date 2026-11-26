@@ -604,3 +604,95 @@ fn test_monotonic_vesting_release_curve_adversarial_sweep() {
         }
     }
 }
+
+#[contract]
+struct MockBoolTrueToken;
+
+#[contractimpl]
+impl MockBoolTrueToken {
+    pub fn transfer(_e: Env, _from: Address, _to: Address, _amount: i128) -> bool {
+        true
+    }
+}
+
+#[contract]
+struct MockBoolFalseToken;
+
+#[contractimpl]
+impl MockBoolFalseToken {
+    pub fn transfer(_e: Env, _from: Address, _to: Address, _amount: i128) -> bool {
+        false
+    }
+}
+
+#[test]
+fn test_safe_transfer_accepts_bool_true_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let owner = Address::generate(&env);
+    let token_id = env.register(MockBoolTrueToken, ());
+    let vesting_id = env.register(
+        VestingScheduleContract,
+        (owner, token_id, 1_000i128, 100u32, None::<u32>, 200u32),
+    );
+    let client = VestingScheduleContractClient::new(&env, &vesting_id);
+
+    env.ledger().set_sequence_number(150);
+    let beneficiary = Address::generate(&env);
+    assert_eq!(client.claim(&beneficiary), 500);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")] // TokenTransferFailed
+fn test_safe_transfer_rejects_bool_false_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let owner = Address::generate(&env);
+    let token_id = env.register(MockBoolFalseToken, ());
+    let vesting_id = env.register(
+        VestingScheduleContract,
+        (owner, token_id, 1_000i128, 100u32, None::<u32>, 200u32),
+    );
+    let client = VestingScheduleContractClient::new(&env, &vesting_id);
+
+    env.ledger().set_sequence_number(150);
+    let beneficiary = Address::generate(&env);
+    client.claim(&beneficiary);
+}
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let fix = create_fixture(100, Some(200), 600, 10_000);
+
+    // Advance ledger halfway through vesting schedule
+    fix.env.ledger().set_sequence_number(350);
+
+    let beneficiary = Address::generate(&fix.env);
+
+    // Reset budget before benchmarking claim under Host v22 parameters
+    fix.env.cost_estimate().budget().reset_default();
+
+    let released = fix.client.claim(&beneficiary);
+    assert!(released > 0);
+
+    let cpu_cost = fix.env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = fix.env.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
+}

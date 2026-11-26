@@ -94,6 +94,7 @@ do not by themselves prove they match current Rust source; build/reconcile fixtu
 when source changes. CI configuration is in [rust.yml](../.github/workflows/rust.yml).
 
 Run at this commit and recorded above: `cargo test`, `stellar contract build`, `cargo clippy`.
+Soroban Host v22 gas calibration models and transaction resource limits are formally verified and documented in [GAS_CALIBRATION_V22.md](GAS_CALIBRATION_V22.md).
 **Not** run in this pass, and still required for the submission: a fresh security scan
 (Almanax rescan — see [almanax-triage.md](almanax-triage.md); Scout is blocked, see
 [scout-triage.md](scout-triage.md)) and any on-network transaction, including the fresh

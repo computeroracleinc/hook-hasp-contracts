@@ -56,9 +56,32 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
-    Address, Env,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    symbol_short, token, Address, Env, IntoVal, InvokeError, TryFromVal, Val,
 };
+
+// ────────────────────────────────────────────────────────────────────────────
+// Safe-transfer helper
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Performs a token `transfer(from, to, amount)` via `try_invoke_contract`.
+///
+/// Accepts standard SEP-41 / SAC tokens returning `void` (`()`) as well as
+/// tokens returning boolean `true`, while strictly rejecting boolean `false`
+/// (`Val::FALSE`), unexpected return shapes, contract errors, or host aborts
+/// with [`VaultError::TokenTransferFailed`].
+fn safe_transfer(e: &Env, token: &Address, from: &Address, to: &Address, amount: &i128) {
+    let args = soroban_sdk::vec![e, from.into_val(e), to.into_val(e), (*amount).into_val(e)];
+    let result = e.try_invoke_contract::<Val, InvokeError>(
+        token,
+        &symbol_short!("transfer"),
+        args,
+    );
+    match result {
+        Ok(Ok(val)) if val.is_void() || bool::try_from_val(e, &val) == Ok(true) => {}
+        _ => panic_with_error!(e, VaultError::TokenTransferFailed),
+    }
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -89,6 +112,14 @@ pub enum VaultError {
     /// This can only occur if the contract was never properly initialized or
     /// if persistent storage was archived without being restored.
     NotInitialized = 3,
+    /// A token transfer failed — the token contract returned an error, returned
+    /// `false`, or returned a non-standard value the vault cannot accept.
+    TokenTransferFailed = 4,
+    /// The withdrawal amount is below the caller's declared minimum
+    /// (`min_amount_out`), or `min_amount_out` itself is zero or negative.
+    SlippageExceeded = 5,
+    /// The deposit or withdrawal `amount` is zero or negative.
+    InvalidAmount = 6,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -215,12 +246,21 @@ impl TimelockVault {
     ///
     /// * `from` — the depositor. `from.require_auth()` is called.
     /// * `token` — the SEP-41 / SAC token contract address.
-    /// * `amount` — stroops (or equivalent smallest unit) to deposit.
+    /// * `amount` — stroops (or equivalent smallest unit) to deposit. Must be
+    ///   greater than zero.
+    ///
+    /// # Errors
+    ///
+    /// * [`VaultError::InvalidAmount`] — `amount` is zero or negative.
+    /// * [`VaultError::TokenTransferFailed`] — token transfer failed or returned `false`.
     pub fn deposit(e: Env, from: Address, token: Address, amount: i128) {
+        if amount <= 0 {
+            panic_with_error!(&e, VaultError::InvalidAmount);
+        }
         from.require_auth();
 
         let vault_addr = e.current_contract_address();
-        token::TokenClient::new(&e, &token).transfer(&from, &vault_addr, &amount);
+        safe_transfer(&e, &token, &from, &vault_addr, &amount);
 
         // Any deposit also keeps the vault's state alive, so an
         // actively-funded long-lock vault needs no separate `bump_ttl`.
@@ -237,15 +277,32 @@ impl TimelockVault {
     /// # Arguments
     ///
     /// * `token` — the SEP-41 / SAC token contract address to withdraw.
-    /// * `amount` — stroops (or equivalent smallest unit) to withdraw.
+    /// * `amount` — stroops (or equivalent smallest unit) to withdraw. Must be
+    ///   greater than zero.
     /// * `to` — recipient address.
+    /// * `min_amount_out` — the minimum amount the caller is willing to
+    ///   receive. Must be greater than zero. If `amount` is less than
+    ///   `min_amount_out`, the call is rejected with
+    ///   [`VaultError::SlippageExceeded`].
     ///
     /// # Errors
     ///
+    /// * [`VaultError::InvalidAmount`] — `amount` is zero or negative.
+    /// * [`VaultError::SlippageExceeded`] — `min_amount_out` is zero or
+    ///   negative, or `amount` is less than `min_amount_out`.
     /// * [`VaultError::StillLocked`] — current ledger is before
     ///   `unlock_ledger`.
+    /// * [`VaultError::TokenTransferFailed`] — token transfer failed or returned `false`.
     /// * Panics via `require_auth` if caller is not the owner.
-    pub fn withdraw(e: Env, token: Address, amount: i128, to: Address) {
+    pub fn withdraw(e: Env, token: Address, amount: i128, to: Address, min_amount_out: i128) {
+        if amount <= 0 {
+            panic_with_error!(&e, VaultError::InvalidAmount);
+        }
+        // ── Slippage gate ──
+        if min_amount_out <= 0 || amount < min_amount_out {
+            panic_with_error!(&e, VaultError::SlippageExceeded);
+        }
+
         // ── Owner gate ──
         let owner: Address = e
             .storage()
@@ -266,7 +323,7 @@ impl TimelockVault {
 
         // ── Transfer ──
         let vault_addr = e.current_contract_address();
-        token::TokenClient::new(&e, &token).transfer(&vault_addr, &to, &amount);
+        safe_transfer(&e, &token, &vault_addr, &to, &amount);
 
         // Bump TTLs so the vault stays alive for future withdrawals.
         extend_state_ttl(&e);

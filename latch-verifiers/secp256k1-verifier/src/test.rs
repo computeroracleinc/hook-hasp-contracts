@@ -376,3 +376,37 @@ fn verifier_calls_write_no_contract_storage() {
 
     std::println!("representative native verify resources: {verify_resources:#?}");
 }
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let e = Env::default();
+    let address = e.register(Secp256k1Verifier, ());
+    let client = Secp256k1VerifierClient::new(&e, &address);
+    let (hash, public_key, signature) = valid_inputs(&e);
+
+    // Reset budget before benchmarking secp256k1 verify under Host v22 parameters
+    e.cost_estimate().budget().reset_default();
+
+    assert!(client.verify(&hash, &public_key, &signature));
+
+    let cpu_cost = e.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = e.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
+}

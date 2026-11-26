@@ -1173,3 +1173,47 @@ fn test_window_constants_are_the_standard_rolling_windows() {
     assert_eq!(crate::ROLLING_24_HOURS_LEDGERS, 17_280);
     assert_eq!(crate::ROLLING_7_DAYS_LEDGERS, 120_960);
 }
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let token = setup_token(&e, 0);
+
+    let rule = install_policy(
+        &e,
+        &client,
+        &smart_account,
+        &oracle,
+        vec![&e, token.clone()],
+        1_000,
+        100,
+    );
+
+    // Reset budget tracking before the benchmarked invocation.
+    e.cost_estimate().budget().reset_default();
+
+    let context = transfer_context(&e, &token, 100);
+    client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
+
+    let cpu_cost = e.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = e.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
+}

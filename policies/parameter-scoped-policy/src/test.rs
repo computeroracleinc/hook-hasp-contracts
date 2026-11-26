@@ -925,3 +925,63 @@ fn test_enforce_type_mismatch_fails_condition() {
         conditions::enforce(&e, &context, &signers, &rule, &smart_account);
     });
 }
+
+#[test]
+fn test_gas_calibration_and_resource_bounds_v22() {
+    let (e, smart_account, _, target, policy_id) = setup();
+    let rule = create_context_rule(&e, &target);
+
+    let mut conditions = Map::new(&e);
+    conditions.set(
+        Symbol::new(&e, "transfer"),
+        Vec::from_array(
+            &e,
+            [Condition {
+                arg_index: 0,
+                operator: Operator::Eq,
+                expected_value: ExpectedValue::U32(50),
+            }],
+        ),
+    );
+
+    e.as_contract(&policy_id, || {
+        conditions::install(
+            &e,
+            &ParameterScopedAccountParams { conditions },
+            &rule,
+            &smart_account,
+        );
+    });
+
+    let context =
+        create_contract_context(&e, &target, "transfer", soroban_sdk::vec![&e, 50u32.into_val(&e)]);
+    let signers = Vec::from_array(&e, [Signer::Delegated(Address::generate(&e))]);
+
+    // Reset budget before benchmarking parameter scoped enforce under Host v22 parameters
+    e.cost_estimate().budget().reset_default();
+
+    e.as_contract(&policy_id, || {
+        conditions::enforce(&e, &context, &signers, &rule, &smart_account);
+    });
+
+    let cpu_cost = e.cost_estimate().budget().cpu_instruction_cost();
+    let mem_cost = e.cost_estimate().budget().memory_bytes_cost();
+
+    const TX_MAX_CPU_INSTRUCTIONS: u64 = 100_000_000;
+    const TX_MAX_MEMORY_BYTES: u64 = 41_943_040; // 40 MiB
+
+    assert!(cpu_cost > 0, "CPU cost must be metered");
+    assert!(mem_cost > 0, "Memory cost must be metered");
+    assert!(
+        cpu_cost < TX_MAX_CPU_INSTRUCTIONS,
+        "CPU cost {} exceeds transaction limit {}",
+        cpu_cost,
+        TX_MAX_CPU_INSTRUCTIONS
+    );
+    assert!(
+        mem_cost < TX_MAX_MEMORY_BYTES,
+        "Memory cost {} exceeds transaction limit {}",
+        mem_cost,
+        TX_MAX_MEMORY_BYTES
+    );
+}

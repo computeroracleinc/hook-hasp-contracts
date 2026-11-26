@@ -20,9 +20,30 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
-    Env,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    symbol_short, Address, Env, IntoVal, InvokeError, TryFromVal, Val,
 };
+
+// ── Safe-transfer helper ──────────────────────────────────────────────────────
+
+/// Performs a token `transfer(from, to, amount)` via `try_invoke_contract`.
+///
+/// Accepts standard SEP-41 / SAC tokens returning `void` (`()`) as well as
+/// tokens returning boolean `true`, while strictly rejecting boolean `false`
+/// (`Val::FALSE`), unexpected return shapes, contract errors, or host aborts
+/// with [`VestingScheduleError::TokenTransferFailed`].
+fn safe_transfer(e: &Env, token: &Address, from: &Address, to: &Address, amount: &i128) {
+    let args = soroban_sdk::vec![e, from.into_val(e), to.into_val(e), (*amount).into_val(e)];
+    let result = e.try_invoke_contract::<Val, InvokeError>(
+        token,
+        &symbol_short!("transfer"),
+        args,
+    );
+    match result {
+        Ok(Ok(val)) if val.is_void() || bool::try_from_val(e, &val) == Ok(true) => {}
+        _ => panic_with_error!(e, VestingScheduleError::TokenTransferFailed),
+    }
+}
 
 // ################## CONSTANTS ##################
 
@@ -78,6 +99,9 @@ pub enum VestingScheduleError {
     InvalidCliffLedger = 4,
     /// The vesting contract has not been initialized.
     NotInitialized = 5,
+    /// A token transfer failed — the token contract returned an error, returned
+    /// `false`, or returned a non-standard value the contract cannot accept.
+    TokenTransferFailed = 6,
 }
 
 // ################## EVENTS ##################
@@ -256,7 +280,9 @@ impl VestingScheduleContract {
 
             e.storage().instance().set(&DataKey::Schedule, &schedule);
 
-            soroban_sdk::token::Client::new(&e, &schedule.token).transfer(
+            safe_transfer(
+                &e,
+                &schedule.token,
                 &e.current_contract_address(),
                 &to,
                 &claimable,
