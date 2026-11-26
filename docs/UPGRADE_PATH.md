@@ -132,30 +132,18 @@ deploy time.
   wrapping `env.deployer().update_current_contract_wasm(...)` via OZ's `upgradeable::upgrade` helper.
   Storage is preserved across the swap; the contract only changes after the invocation completes.
 - **OZ's `Upgradeable` trait vs. hand-rolled**: using OZ's directly — see Decision 2 above.
-- **Authorization tier**: `upgrade()` sits behind exactly the same `e.current_contract_address()
-  .require_auth()` gate as every other administrative method on the account (`add_signer`,
-  `remove_policy`, `add_context_rule`, ...). It does not introduce a new or weaker authorization
-  surface — whatever context rule/policy configuration would already let a caller authorize
-  `add_signer` today would equally authorize `upgrade()`. This is a pre-existing property of the
-  whole account design, not something specific to `upgrade()`: OZ's own `v0.7.0` audit calls out
-  that a `CallContract` rule grants full contract-level access to *every* `require_auth`-gated
-  entrypoint on that contract, not just one function, and states plainly that "context rules are
-  expected to be correctly configured" as a trust assumption of the library. Getting a session-key
-  policy scoped too broadly is a real risk today for `add_signer` and `remove_policy` just as much
-  as for `upgrade()` — worth being deliberate about when configuring any `CallContract` rule
-  pointed at the account's own address, not something `upgrade()` specifically needs to solve.
+- **Authorization tier & Re-entrancy protection**: `upgrade()` sits behind `e.current_contract_address().require_auth()`
+  and is protected by an explicit instance-storage re-entrancy lock (`UpgradeLock`). Unauthorized external
+  callers or nested re-entrant upgrade calls are rejected immediately before any bytecode substitution.
+- **State migration verification hook**: `verify_state_migration(e)` is executed immediately after `upgrade()`
+  within the same transaction before commit. It verifies that core account state (at least one active context
+  rule, schema version, and any live persistent satellite deployment records) remains accessible and uncorrupted
+  without bricking upgrades if rule `0` was replaced or historical deployment records expired.
+- **V1 -> V2 bytecode upgrade testing**: Verified in `latch-smart-account/src/test.rs` with v1->v2 contract
+  bytecode fixture (`testdata/smart_account_v2.wasm`), proving storage format compatibility and state
+  preservation across real upgrades.
 
 ## Still open
 
-- Storage migration strategy, if a future account version changes stored state shape. OZ's own
-  `upgradeable` module docs recommend one of: eager migration (bounded data), lazy migration
-  (unbounded data), or enum wrappers for forward-compatible layouts — not yet decided which fits
-  a future breaking `LatchSmartAccount` change, since no such change exists yet to migrate.
 - Client-side (web extension / mobile / dApp) UX for surfacing "a new account version is
   available" and walking a user through authorizing the upgrade.
-- No test yet proves an upgrade *changes behavior* (only that the mechanism succeeds end-to-end
-  against the account's own current wasm) — would need a second, distinct compiled contract
-  fixture to upgrade *to*, similar to how `factory-contract`'s tests embed pre-built `dummy-*`
-  wasm files. Not done because OZ's own `stellar-contract-utils` test suite doesn't test this
-  depth either — the mechanism itself (`update_current_contract_wasm`) is a thin, audited call
-  into a Soroban host function, not custom logic of ours to re-verify.

@@ -19,7 +19,10 @@ use stellar_accounts::{
     smart_account::{self as smart_account, AuthPayload, ContextRuleType, Signer},
 };
 
-use super::{LatchSmartAccount, LatchSmartAccountClient};
+use super::{
+    LatchSmartAccount, LatchSmartAccountClient, ProposalStatus, SignerAction, TransferOp,
+    DEFAULT_RECOVERY_INACTIVITY_DELAY_LEDGERS,
+};
 
 // A real, tiny, already-existing no-op contract (zero-arg constructor),
 // reused from `factory-contract`'s own testdata rather than building a new
@@ -27,6 +30,10 @@ use super::{LatchSmartAccount, LatchSmartAccountClient};
 // exercises the real Soroban host deployer, not a mocked one.
 mod dummy_singleton {
     soroban_sdk::contractimport!(file = "testdata/dummy_singleton.wasm");
+}
+
+mod smart_account_v2 {
+    soroban_sdk::contractimport!(file = "testdata/smart_account_v2.wasm");
 }
 
 #[contract]
@@ -1301,4 +1308,968 @@ fn test_concurrent_100_smart_account_policy_evaluations() {
         completed += 1;
     }
     assert_eq!(completed, 100);
+}
+
+// ################## FLASH-LOAN CALLBACK TESTS (#170) ##################
+
+#[test]
+fn flash_loan_callback_succeeds_for_registered_protocol_with_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let protocol = Address::generate(&env);
+    assert!(!client.is_approved_flash_loan_protocol(&protocol));
+
+    client.register_flash_loan_protocol(&protocol);
+    assert!(client.is_approved_flash_loan_protocol(&protocol));
+
+    let token = Address::generate(&env);
+    client.flash_loan_callback(&protocol, &token, &1_000, &Val::from_void().into());
+
+    client.remove_flash_loan_protocol(&protocol);
+    assert!(!client.is_approved_flash_loan_protocol(&protocol));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4002)")] // FlashLoanCallbackUnauthorized
+fn flash_loan_callback_rejects_unregistered_protocol() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let attacker = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.flash_loan_callback(&attacker, &token, &1_000, &Val::from_void().into());
+}
+
+#[test]
+#[should_panic]
+fn flash_loan_callback_blocks_protocol_spoofing_without_caller_auth() {
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
+    let env = Env::default();
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let protocol = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    // Register protocol using mocked self-auth.
+    env.mock_all_auths();
+    client.register_flash_loan_protocol(&protocol);
+
+    // Now supply ONLY account self-auth (NO auth from `protocol`) — must fail
+    // because `caller.require_auth()` prevents spoofing an approved protocol.
+    let data: Val = Val::from_void().into();
+    let account_auth = MockAuth {
+        address: &account_id,
+        invoke: &MockAuthInvoke {
+            contract: &account_id,
+            fn_name: "flash_loan_callback",
+            args: (protocol.clone(), token.clone(), 1_000i128, data).into_val(&env),
+            sub_invokes: &[],
+        },
+    };
+    client
+        .mock_auths(&[account_auth])
+        .flash_loan_callback(&protocol, &token, &1_000, &data);
+}
+
+// ################## BATCH TRANSFER TESTS (#175) ##################
+
+#[contract]
+struct MockBatchToken;
+
+#[contractimpl]
+impl MockBatchToken {
+    pub fn mint(e: Env, to: Address, amount: i128) {
+        let cur: i128 = e.storage().persistent().get(&to).unwrap_or(0);
+        e.storage().persistent().set(&to, &(cur + amount));
+    }
+
+    pub fn balance(e: Env, id: Address) -> i128 {
+        e.storage().persistent().get(&id).unwrap_or(0)
+    }
+
+    pub fn transfer(e: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+        let from_bal: i128 = e.storage().persistent().get(&from).unwrap_or(0);
+        assert!(from_bal >= amount, "insufficient balance");
+        e.storage().persistent().set(&from, &(from_bal - amount));
+        let to_bal: i128 = e.storage().persistent().get(&to).unwrap_or(0);
+        e.storage().persistent().set(&to, &(to_bal + amount));
+    }
+}
+
+#[contract]
+struct MockLeakyToken;
+
+#[contractimpl]
+impl MockLeakyToken {
+    pub fn mint(e: Env, to: Address, amount: i128) {
+        let cur: i128 = e.storage().persistent().get(&to).unwrap_or(0);
+        e.storage().persistent().set(&to, &(cur + amount));
+    }
+
+    pub fn balance(e: Env, id: Address) -> i128 {
+        e.storage().persistent().get(&id).unwrap_or(0)
+    }
+
+    pub fn transfer(e: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+        // Secretly drains 1 extra unit from `from`, violating the balance invariant.
+        let from_bal: i128 = e.storage().persistent().get(&from).unwrap_or(0);
+        e.storage().persistent().set(&from, &(from_bal - amount - 1));
+        let to_bal: i128 = e.storage().persistent().get(&to).unwrap_or(0);
+        e.storage().persistent().set(&to, &(to_bal + amount));
+    }
+}
+
+#[test]
+fn batch_transfer_succeeds_including_self_transfers() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let token_id = env.register(MockBatchToken, ());
+    let token_client = MockBatchTokenClient::new(&env, &token_id);
+    token_client.mint(&account_id, &1_000);
+
+    let recipient = Address::generate(&env);
+    let ops = vec![
+        &env,
+        TransferOp { token: token_id.clone(), to: recipient.clone(), amount: 250 },
+        // Self-transfer must NOT break expected_delta balance invariant.
+        TransferOp { token: token_id.clone(), to: account_id.clone(), amount: 300 },
+        TransferOp { token: token_id.clone(), to: recipient.clone(), amount: 150 },
+    ];
+
+    client.batch_transfer(&ops);
+    assert_eq!(token_client.balance(&account_id), 600);
+    assert_eq!(token_client.balance(&recipient), 400);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4004)")] // InvalidTransferAmount
+fn batch_transfer_rejects_zero_or_negative_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let token_id = env.register(MockBatchToken, ());
+    let recipient = Address::generate(&env);
+    client.batch_transfer(&vec![&env, TransferOp { token: token_id, to: recipient, amount: 0 }]);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4003)")] // BalanceInvariantViolated
+fn batch_transfer_halted_on_balance_invariant_violation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let leaky_id = env.register(MockLeakyToken, ());
+    let leaky_client = MockLeakyTokenClient::new(&env, &leaky_id);
+    leaky_client.mint(&account_id, &1_000);
+
+    let recipient = Address::generate(&env);
+    client.batch_transfer(&vec![&env, TransferOp { token: leaky_id, to: recipient, amount: 100 }]);
+}
+
+// ################## PAUSABLE & UPGRADE TESTS (#190) ##################
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1000)")] // EnforcedPause
+fn execute_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    assert!(!client.paused());
+    client.pause(&account_id);
+    assert!(client.paused());
+
+    let target_id = env.register(MockTargetContract, ());
+    client.execute(&target_id, &Symbol::new(&env, "set"), &vec![&env, 1u32.into_val(&env)]);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4007)")] // UnauthorizedPauseCaller
+fn pause_rejects_external_caller() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let attacker = Address::generate(&env);
+    client.pause(&attacker);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4007)")] // UnauthorizedPauseCaller
+fn unpause_rejects_external_caller() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    client.pause(&account_id);
+    let attacker = Address::generate(&env);
+    client.unpause(&attacker);
+}
+
+#[test]
+fn admin_recovery_path_remains_operational_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    client.pause(&account_id);
+    assert!(client.paused());
+
+    let recovery_signer = Signer::Delegated(Address::generate(&env));
+    let recovery_signers = vec![&env, recovery_signer];
+    let added_rule = client.add_context_rule(
+        &ContextRuleType::Default,
+        &String::from_str(&env, "recovery"),
+        &None,
+        &recovery_signers,
+        &Map::new(&env),
+    );
+    assert_eq!(added_rule.name, String::from_str(&env, "recovery"));
+    assert_eq!(client.get_context_rules_count(), 2);
+
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let default_rule = client.get_context_rule(&0);
+    let signer_id = client.add_signer(&default_rule.id, &new_signer);
+    assert_eq!(signer_id, 2);
+
+    client.unpause(&account_id);
+    assert!(!client.paused());
+
+    let target_id = env.register(MockTargetContract, ());
+    let target_client = MockTargetContractClient::new(&env, &target_id);
+    client.execute(&target_id, &Symbol::new(&env, "set"), &vec![&env, 42u32.into_val(&env)]);
+    assert_eq!(target_client.get(), 42);
+}
+
+#[test]
+#[should_panic]
+fn pause_requires_self_auth() {
+    let env = Env::default();
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    client.pause(&account_id);
+}
+
+#[test]
+#[should_panic]
+fn upgrade_rejects_unauthorized_external_caller() {
+    let env = Env::default();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let attacker = Address::generate(&env);
+    let new_wasm_hash = BytesN::from_array(&env, &[0u8; 32]);
+    client.upgrade(&new_wasm_hash, &attacker);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4005)")] // ReentrancyGuardTriggered
+fn upgrade_reentrancy_guard_blocks_recursive_upgrade() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let Some(Executable::Wasm(wasm_hash)) = account_id.executable() else {
+        panic!("expected a wasm-backed account");
+    };
+
+    env.as_contract(&account_id, || {
+        env.storage()
+            .instance()
+            .set(&super::LatchSmartAccountStorageKey::UpgradeLock, &true);
+    });
+
+    client.upgrade(&wasm_hash, &account_id);
+}
+
+#[test]
+fn upgrade_to_v2_bytecode_and_verify_state_migration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    assert_eq!(client.get_context_rules_count(), 1);
+    assert_eq!(client.get_deployed_contract_count(), 0);
+
+    let dummy_hash = deployed_wasm_hash(&env);
+    let salt = BytesN::from_array(&env, &[42u8; 32]);
+    let deployed_addr = client.deploy_contract(&dummy_hash, &salt, &vec![&env]);
+    assert_eq!(client.get_deployed_contract_count(), 1);
+
+    let v2_wasm_hash = env.deployer().upload_contract_wasm(smart_account_v2::WASM);
+    client.upgrade(&v2_wasm_hash, &account_id);
+
+    assert_eq!(client.get_context_rules_count(), 1);
+    let default_rule = client.get_context_rule(&0);
+    assert_eq!(default_rule.name, String::from_str(&env, "default"));
+    assert_eq!(client.get_deployed_contract_count(), 1);
+    let record = client.get_deployed_contract(&0);
+    assert_eq!(record.address, deployed_addr);
+    assert_eq!(record.wasm_hash, dummy_hash);
+}
+
+#[test]
+fn verify_state_migration_succeeds_even_when_rule_zero_replaced() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let replacement_signers = default_signers(&env);
+    client.add_context_rule(
+        &ContextRuleType::Default,
+        &String::from_str(&env, "new_default"),
+        &None,
+        &replacement_signers,
+        &Map::new(&env),
+    );
+    client.remove_context_rule(&0);
+
+    // Must NOT brick when rule 0 has been removed as long as >= 1 rule exists.
+    client.verify_state_migration();
+}
+
+// ################## FALLBACK RECOVERY TESTS (#191) ##################
+
+#[test]
+fn set_and_get_recovery_config_succeeds_with_self_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let g1 = Signer::Delegated(Address::generate(&env));
+    let g2 = Signer::Delegated(Address::generate(&env));
+    let g3 = Signer::Delegated(Address::generate(&env));
+    let guardians = vec![&env, g1, g2, g3];
+
+    client.set_recovery_config(&guardians, &2, &DEFAULT_RECOVERY_INACTIVITY_DELAY_LEDGERS);
+
+    let config = client.get_recovery_config();
+    assert_eq!(config.threshold, 2);
+    assert_eq!(config.inactivity_delay_ledgers, DEFAULT_RECOVERY_INACTIVITY_DELAY_LEDGERS);
+    assert_eq!(config.recovery_signers, guardians);
+    assert!(!client.is_recovery_eligible());
+    assert_eq!(client.get_recovery_nonce(), 0);
+}
+
+#[test]
+fn set_recovery_config_initializes_last_active_ledger_on_upgraded_account() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_sequence_number(500_000);
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    // Simulate an upgraded account that did not have LastActiveLedger stored.
+    env.as_contract(&account_id, || {
+        env.storage()
+            .instance()
+            .remove(&super::LatchSmartAccountStorageKey::LastActiveLedger);
+    });
+    assert_eq!(client.get_last_active_ledger(), 0);
+
+    let g1 = Signer::Delegated(Address::generate(&env));
+    client.set_recovery_config(&vec![&env, g1], &1, &100);
+
+    // Must initialize LastActiveLedger to current ledger (500_000), preventing
+    // instant zero-delay takeover.
+    assert_eq!(client.get_last_active_ledger(), 500_000);
+    assert!(!client.is_recovery_eligible());
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4010)")] // InvalidRecoveryConfig
+fn set_recovery_config_rejects_zero_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let g1 = Signer::Delegated(Address::generate(&env));
+    client.set_recovery_config(&vec![&env, g1], &0, &100);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4010)")] // InvalidRecoveryConfig
+fn set_recovery_config_rejects_duplicate_signers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let g1 = Signer::Delegated(Address::generate(&env));
+    client.set_recovery_config(&vec![&env, g1.clone(), g1], &1, &100);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4009)")] // RecoveryNotConfigured
+fn remove_recovery_config_panics_when_not_configured() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    client.remove_recovery_config();
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4011)")] // InactivityDelayNotMet
+fn recovery_rejects_when_inactivity_delay_not_met() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_sequence_number(1_000);
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let g1 = Signer::Delegated(Address::generate(&env));
+    client.set_recovery_config(&vec![&env, g1.clone()], &1, &100);
+    env.ledger().set_sequence_number(1_099);
+
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let mut signatures = Map::new(&env);
+    signatures.set(g1, Bytes::new(&env));
+    client.recover_signers(&0, &vec![&env, new_signer], &signatures);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4012)")] // RecoveryThresholdNotMet
+fn recovery_threshold_rules_enforced_requires_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_sequence_number(1_000);
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let g1 = Signer::Delegated(Address::generate(&env));
+    let g2 = Signer::Delegated(Address::generate(&env));
+    let g3 = Signer::Delegated(Address::generate(&env));
+    client.set_recovery_config(&vec![&env, g1.clone(), g2, g3], &2, &100);
+
+    env.ledger().set_sequence_number(1_200);
+    let mut signatures = Map::new(&env);
+    signatures.set(g1, Bytes::new(&env));
+    client.recover_signers(&0, &vec![&env, Signer::Delegated(Address::generate(&env))], &signatures);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4013)")] // UnauthorizedRecoverySigner
+fn recovery_rejects_unauthorized_signer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_sequence_number(1_000);
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let g1 = Signer::Delegated(Address::generate(&env));
+    client.set_recovery_config(&vec![&env, g1], &1, &100);
+
+    env.ledger().set_sequence_number(1_200);
+    let attacker = Signer::Delegated(Address::generate(&env));
+    let mut signatures = Map::new(&env);
+    signatures.set(attacker, Bytes::new(&env));
+    client.recover_signers(&0, &vec![&env, Signer::Delegated(Address::generate(&env))], &signatures);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4015)")] // EmptyNewSigners
+fn recovery_rejects_empty_new_signers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_sequence_number(1_000);
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let g1 = Signer::Delegated(Address::generate(&env));
+    client.set_recovery_config(&vec![&env, g1.clone()], &1, &100);
+
+    env.ledger().set_sequence_number(1_200);
+    let mut signatures = Map::new(&env);
+    signatures.set(g1, Bytes::new(&env));
+    client.recover_signers(&0, &vec![&env], &signatures);
+}
+
+#[test]
+fn end_to_end_recovery_rotates_signers_and_handles_max_signers() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_sequence_number(1_000);
+
+    // Start with 10 signers and rotate to 6 new signers: naive add-before-remove
+    // would hit 10 + 6 = 16 > MAX_SIGNERS (15) and fail, while our safe rotation
+    // succeeds within both MAX_SIGNERS and Soroban's per-tx footprint limit.
+    let mut initial_signers = Vec::new(&env);
+    for _ in 0..10 {
+        initial_signers.push_back(Signer::Delegated(Address::generate(&env)));
+    }
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &initial_signers, &policies);
+
+    let g1 = Signer::Delegated(Address::generate(&env));
+    let g2 = Signer::Delegated(Address::generate(&env));
+    client.set_recovery_config(
+        &vec![&env, g1.clone(), g2.clone()],
+        &2,
+        &DEFAULT_RECOVERY_INACTIVITY_DELAY_LEDGERS,
+    );
+
+    let recovery_ledger = 1_000 + DEFAULT_RECOVERY_INACTIVITY_DELAY_LEDGERS;
+    env.ledger().set_sequence_number(recovery_ledger);
+    assert!(client.is_recovery_eligible());
+
+    let mut new_signers = Vec::new(&env);
+    for _ in 0..6 {
+        new_signers.push_back(Signer::Delegated(Address::generate(&env)));
+    }
+
+    let digest = client.get_recovery_digest(&0, &new_signers);
+    assert_eq!(digest.len(), 32);
+
+    let mut signatures = Map::new(&env);
+    signatures.set(g1, Bytes::new(&env));
+    signatures.set(g2, Bytes::new(&env));
+
+    client.recover_signers(&0, &new_signers, &signatures);
+
+    let default_rule = client.get_context_rule(&0);
+    assert_eq!(default_rule.signers.len(), 6);
+    for s in new_signers.iter() {
+        assert!(default_rule.signers.contains(&s));
+    }
+    assert_eq!(client.get_recovery_nonce(), 1);
+    assert_eq!(client.get_last_active_ledger(), recovery_ledger);
+}
+
+#[test]
+fn touch_activity_resets_inactivity_timer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_sequence_number(1_000);
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let g1 = Signer::Delegated(Address::generate(&env));
+    client.set_recovery_config(&vec![&env, g1], &1, &100);
+
+    env.ledger().set_sequence_number(1_200);
+    assert!(client.is_recovery_eligible());
+
+    client.touch_activity();
+    assert_eq!(client.get_last_active_ledger(), 1_200);
+    assert!(!client.is_recovery_eligible());
+}
+
+// ################## RE-ENTRANCY PROTECTION TESTS (#192) ##################
+
+#[contract]
+struct MockMaliciousFactoryContract;
+
+#[contractimpl]
+impl MockMaliciousFactoryContract {
+    pub fn reenter_execute(e: Env, smart_account: Address, target: Address) {
+        let client = LatchSmartAccountClient::new(&e, &smart_account);
+        client.execute(&target, &Symbol::new(&e, "set"), &vec![&e, 99u32.into_val(&e)]);
+    }
+
+    pub fn reenter_deploy(e: Env, smart_account: Address, wasm_hash: BytesN<32>) {
+        let client = LatchSmartAccountClient::new(&e, &smart_account);
+        let salt = BytesN::from_array(&e, &[42u8; 32]);
+        client.deploy_contract(&wasm_hash, &salt, &vec![&e]);
+    }
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4008)")] // ReentrantCall
+fn deploy_contract_reentrancy_guard_blocks_malicious_constructor_reentering_execute() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let target_id = env.register(MockTargetContract, ());
+
+    env.as_contract(&account_id, || {
+        super::acquire_reentrancy_lock(&env);
+    });
+
+    client.execute(&target_id, &Symbol::new(&env, "set"), &vec![&env, 99u32.into_val(&env)]);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4008)")] // ReentrantCall
+fn deploy_contract_reentrancy_guard_blocks_nested_deploy_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let wasm_hash = deployed_wasm_hash(&env);
+    let salt = BytesN::from_array(&env, &[11u8; 32]);
+
+    env.as_contract(&account_id, || {
+        super::acquire_reentrancy_lock(&env);
+    });
+
+    client.deploy_contract(&wasm_hash, &salt, &vec![&env]);
+}
+
+#[test]
+#[should_panic]
+fn execute_reentrancy_guard_blocks_malicious_factory_reentering_execute() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let target_id = env.register(MockTargetContract, ());
+    let malicious_factory_id = env.register(MockMaliciousFactoryContract, ());
+
+    client.execute(
+        &malicious_factory_id,
+        &Symbol::new(&env, "reenter_execute"),
+        &vec![&env, account_id.into_val(&env), target_id.into_val(&env)],
+    );
+}
+
+#[test]
+#[should_panic]
+fn execute_reentrancy_guard_blocks_malicious_factory_reentering_deploy_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (account_id, client) = register_account(&env, &signers, &policies);
+
+    let wasm_hash = deployed_wasm_hash(&env);
+    let malicious_factory_id = env.register(MockMaliciousFactoryContract, ());
+
+    client.execute(
+        &malicious_factory_id,
+        &Symbol::new(&env, "reenter_deploy"),
+        &vec![&env, account_id.into_val(&env), wasm_hash.into_val(&env)],
+    );
+}
+
+#[test]
+fn deploy_contract_releases_reentrancy_lock_allowing_subsequent_execute() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let wasm_hash = deployed_wasm_hash(&env);
+    let salt = BytesN::from_array(&env, &[21u8; 32]);
+
+    let deployed = client.deploy_contract(&wasm_hash, &salt, &vec![&env]);
+    assert_eq!(client.get_deployed_contract_count(), 1);
+    assert_eq!(client.get_deployed_contract(&0).address, deployed);
+
+    let target_id = env.register(MockTargetContract, ());
+    let target_client = MockTargetContractClient::new(&env, &target_id);
+    client.execute(&target_id, &Symbol::new(&env, "set"), &vec![&env, 42u32.into_val(&env)]);
+    assert_eq!(target_client.get(), 42);
+}
+
+// ################## SIGNER TIMELOCK TESTS (#193) ##################
+
+#[test]
+fn signer_timelock_delay_configuration_and_timelocked_reduction() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    assert_eq!(client.get_signer_timelock_delay(), 0);
+
+    let delay_seconds: u64 = 86400;
+    client.set_signer_timelock_delay(&delay_seconds);
+    assert_eq!(client.get_signer_timelock_delay(), delay_seconds);
+
+    // Reducing delay requires going through the timelocked proposal path.
+    let pending = client.propose_timelock_delay_change(&3600);
+    assert_eq!(pending.new_delay, 3600);
+    assert_eq!(pending.eta, env.ledger().timestamp() + delay_seconds);
+
+    env.ledger().set_timestamp(pending.eta);
+    client.accept_timelock_delay_change();
+    assert_eq!(client.get_signer_timelock_delay(), 3600);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4019)")] // DelayReductionNotAllowed
+fn set_signer_timelock_delay_blocks_instant_reduction_to_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    client.set_signer_timelock_delay(&86400);
+    // Attempting to bypass the timelock by instantly lowering delay to 0 must panic.
+    client.set_signer_timelock_delay(&0);
+}
+
+#[test]
+#[should_panic]
+fn set_signer_timelock_delay_requires_self_auth() {
+    let env = Env::default();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    client.set_signer_timelock_delay(&3600);
+}
+
+#[test]
+fn propose_and_accept_signer_add_with_timelock() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let default_rule = client.get_context_rule(&0);
+    let delay: u64 = 3600;
+    client.set_signer_timelock_delay(&delay);
+
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let proposal_id =
+        client.propose_signer(&default_rule.id, &SignerAction::Add(new_signer.clone()));
+    assert_eq!(proposal_id, 0);
+    assert_eq!(client.get_signer_proposal_count(), 1);
+
+    let proposal = client.get_signer_proposal(&proposal_id);
+    assert_eq!(proposal.id, 0);
+    assert_eq!(proposal.context_rule_id, default_rule.id);
+    assert_eq!(proposal.status, ProposalStatus::Pending);
+    assert_eq!(proposal.eta, env.ledger().timestamp() + delay);
+
+    env.ledger().set_timestamp(proposal.eta);
+    client.accept_signer(&proposal_id);
+
+    let executed_proposal = client.get_signer_proposal(&proposal_id);
+    assert_eq!(executed_proposal.status, ProposalStatus::Executed);
+
+    let updated_rule = client.get_context_rule(&default_rule.id);
+    assert!(updated_rule.signers.contains(&new_signer));
+}
+
+#[test]
+fn propose_and_accept_signer_remove_with_timelock() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let initial_signer = Signer::Delegated(Address::generate(&env));
+    let second_signer = Signer::Delegated(Address::generate(&env));
+    let signers = vec![&env, initial_signer.clone(), second_signer.clone()];
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let default_rule = client.get_context_rule(&0);
+    let delay: u64 = 7200;
+    client.set_signer_timelock_delay(&delay);
+
+    let proposal_id = client.propose_signer(&default_rule.id, &SignerAction::Remove(1));
+    let proposal = client.get_signer_proposal(&proposal_id);
+    assert_eq!(proposal.status, ProposalStatus::Pending);
+
+    env.ledger().set_timestamp(proposal.eta);
+    client.accept_signer(&proposal_id);
+
+    let updated_rule = client.get_context_rule(&default_rule.id);
+    assert_eq!(updated_rule.signers.len(), 1);
+    assert!(updated_rule.signers.contains(&initial_signer));
+    assert!(!updated_rule.signers.contains(&second_signer));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4018)")] // TimelockNotExpired
+fn accept_signer_before_timelock_expires_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let default_rule = client.get_context_rule(&0);
+    client.set_signer_timelock_delay(&1000);
+
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let proposal_id = client.propose_signer(&default_rule.id, &SignerAction::Add(new_signer));
+    client.accept_signer(&proposal_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4001)")] // MathOverflow
+fn propose_signer_rejects_eta_timestamp_overflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    client.set_signer_timelock_delay(&1000);
+    env.ledger().set_timestamp(u64::MAX - 500);
+    client.propose_signer(&0, &SignerAction::Add(Signer::Delegated(Address::generate(&env))));
+}
+
+#[test]
+#[should_panic]
+fn propose_signer_rejects_nonexistent_context_rule() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    client.propose_signer(&999, &SignerAction::Add(Signer::Delegated(Address::generate(&env))));
+}
+
+#[test]
+fn cancel_pending_signer_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let default_rule = client.get_context_rule(&0);
+    client.set_signer_timelock_delay(&1000);
+
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let proposal_id = client.propose_signer(&default_rule.id, &SignerAction::Add(new_signer));
+    client.cancel_signer_proposal(&proposal_id);
+
+    let proposal = client.get_signer_proposal(&proposal_id);
+    assert_eq!(proposal.status, ProposalStatus::Cancelled);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4017)")] // ProposalNotPending
+fn cannot_accept_cancelled_signer_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let default_rule = client.get_context_rule(&0);
+    let delay: u64 = 1000;
+    client.set_signer_timelock_delay(&delay);
+
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let proposal_id = client.propose_signer(&default_rule.id, &SignerAction::Add(new_signer));
+
+    client.cancel_signer_proposal(&proposal_id);
+    env.ledger().set_timestamp(env.ledger().timestamp() + delay + 10);
+    client.accept_signer(&proposal_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4017)")] // ProposalNotPending
+fn cannot_cancel_already_executed_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let signers = default_signers(&env);
+    let policies = Map::new(&env);
+    let (_account_id, client) = register_account(&env, &signers, &policies);
+
+    let default_rule = client.get_context_rule(&0);
+    let delay: u64 = 500;
+    client.set_signer_timelock_delay(&delay);
+
+    let new_signer = Signer::Delegated(Address::generate(&env));
+    let proposal_id = client.propose_signer(&default_rule.id, &SignerAction::Add(new_signer));
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + delay);
+    client.accept_signer(&proposal_id);
+    client.cancel_signer_proposal(&proposal_id);
 }

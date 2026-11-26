@@ -11,7 +11,7 @@ Built on [OpenZeppelin Stellar Contracts](https://github.com/OpenZeppelin/stella
 <img width="2383" height="2560" alt="smartaccount" src="https://github.com/user-attachments/assets/73b919ce-7137-4c2e-b03e-4fc45d50f999" />
 
 
-The contract implements four OpenZeppelin interfaces: `CustomAccountInterface` (`__check_auth`), `SmartAccount` (context rule CRUD), `ExecutionEntryPoint` (`execute`), and `Upgradeable` (`upgrade`). The Latch layer adds constructor setup, `batch_add_signer`, and `upgrade`.
+The contract implements five OpenZeppelin interfaces: `CustomAccountInterface` (`__check_auth`), `SmartAccount` (context rule CRUD), `ExecutionEntryPoint` (`execute`), `Pausable` (`pause`, `unpause`, `paused`), and `Upgradeable` (`upgrade`). The Latch layer adds constructor setup, `batch_add_signer`, `batch_transfer`, flash-loan callback registry, threshold fallback recovery, timelocked signer rotation, `upgrade`, and emergency pause on `execute`.
 
 ---
 
@@ -28,6 +28,15 @@ Creates a single `Default` context rule named `"default"` with the provided sign
 fn batch_add_signer(env: &Env, context_rule_id: u32, signers: Vec<Signer>)
 ```
 
+**Threshold Fallback Recovery** — configures secondary recovery signers with an extended inactivity delay (default 14 days / 241,920 ledgers) and domain-separated recovery digests:
+- `set_recovery_config(env, recovery_signers, threshold, inactivity_delay_ledgers)` — self-auth
+- `recover_signers(env, context_rule_id, new_signers, signatures)` — replaces signers after inactivity delay + threshold guardian auth
+- `touch_activity(env)` / `is_recovery_eligible(env)`
+
+**Timelocked Signer Rotation Queue** — enforces configurable timelock delays on signer proposals and prevents instant delay reductions:
+- `set_signer_timelock_delay(env, delay)` — immediately increases delay (self-auth; reductions require timelocked `propose_timelock_delay_change` / `accept_timelock_delay_change`)
+- `propose_signer(env, context_rule_id, action)` / `accept_signer(env, proposal_id)` / `cancel_signer_proposal(env, proposal_id)`
+
 **`upgrade`** — replaces the account's own WASM in place, preserving storage. Requires self-auth — gated by `e.current_contract_address().require_auth()`, the same as every other mutation here. No external admin involved. See [`UPGRADE_PATH.md`](../docs/UPGRADE_PATH.md) for the full reasoning.
 ```rust
 fn upgrade(env: &Env, new_wasm_hash: BytesN<32>, operator: Address)
@@ -43,7 +52,12 @@ fn upgrade(env: &Env, new_wasm_hash: BytesN<32>, operator: Address)
 | `add_policy(rule_id, address, params)` / `remove_policy(rule_id, address)` | Manage policies |
 | `get_context_rule(id)` / `get_context_rules_count()` | Read-only queries |
 
-**Inherited from `ExecutionEntryPoint`**: `execute(contract, function, args)` — calls another contract as this account. Requires self-auth.
+**Inherited from `ExecutionEntryPoint`**: `execute(contract, function, args)` — calls another contract as this account. Requires self-auth, guarded by `when_not_paused` and a temporary-storage re-entrancy lock.
+
+**Inherited from `Pausable`**:
+- `pause(caller)` — triggers emergency pause, freezing outgoing `execute` and `batch_transfer` calls. Strictly requires `caller == e.current_contract_address()` with self-auth.
+- `unpause(caller)` — lifts emergency pause. Strictly requires `caller == e.current_contract_address()` with self-auth.
+- `paused()` — returns current pause state (`bool`).
 
 **Atomic Batch Execution & Rollback Guarantee**: When executing multi-step operations (`batch_add_signer` or multi-operation transactions dispatched through the smart account), execution is strictly atomic within the Soroban host frame — if step $N$ panics or fails validation (e.g. duplicate signer, policy rejection, or target contract revert), all state mutations from steps $1 \dots N-1$ are rolled back atomically.
 
