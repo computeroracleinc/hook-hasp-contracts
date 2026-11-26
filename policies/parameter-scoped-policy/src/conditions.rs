@@ -241,6 +241,10 @@ pub fn enforce(
                 .unwrap_or_else(|| panic_with_error!(e, ParameterScopedError::MethodNotAllowed));
 
             for cond in fn_conditions.into_iter() {
+                if cond.arg_index >= args.len() {
+                    panic_with_error!(e, ParameterScopedError::ArgumentIndexOutOfBounds)
+                }
+
                 let actual_arg = args.get(cond.arg_index).unwrap_or_else(|| {
                     panic_with_error!(e, ParameterScopedError::ArgumentIndexOutOfBounds)
                 });
@@ -323,6 +327,11 @@ pub fn install(
 
     let data = ParameterScopedData { conditions: params.conditions.clone() };
     e.storage().persistent().set(&key, &data);
+    e.storage().persistent().extend_ttl(
+        &key,
+        PARAMETER_SCOPED_TTL_THRESHOLD,
+        PARAMETER_SCOPED_EXTEND_AMOUNT,
+    );
     emit_conditions_installed(e, smart_account.clone(), context_rule.id);
 }
 

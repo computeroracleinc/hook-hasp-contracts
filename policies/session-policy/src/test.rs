@@ -639,3 +639,119 @@ fn revoke_session_requires_smart_account_auth() {
         assert!(!is_revoked(&e, context_rule.id, &smart_account));
     });
 }
+
+// ################## STORAGE TTL / EXPIRY THRESHOLD TESTS (#186, #187) ##################
+
+/// SESSION_EXTEND_AMOUNT = 30 * 17280 = 518400 ledgers
+/// SESSION_TTL_THRESHOLD = SESSION_EXTEND_AMOUNT - 17280 = 501120 ledgers
+const SESSION_NEAR_EXPIRY_LEDGER: u32 = 501_000;
+
+#[test]
+fn get_allowed_fns_near_ttl_threshold_renews_and_succeeds() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams { allowed_fns: vec![&e, symbol_short!("set")] };
+        install(&e, &params, &context_rule, &smart_account);
+    });
+
+    e.ledger().with_mut(|li| {
+        li.sequence_number = SESSION_NEAR_EXPIRY_LEDGER;
+        li.max_entry_ttl = 6_312_000;
+        li.min_persistent_entry_ttl = 1;
+    });
+
+    e.as_contract(&address, || {
+        let fns = get_allowed_fns(&e, context_rule.id, &smart_account);
+        assert!(fns.contains(&symbol_short!("set")));
+    });
+}
+
+#[test]
+fn install_at_high_ledger_sequence_succeeds() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+
+    e.mock_all_auths();
+
+    e.ledger().with_mut(|li| {
+        li.sequence_number = 1_000_000;
+        li.max_entry_ttl = 6_312_000;
+        li.min_persistent_entry_ttl = 1;
+    });
+
+    let context_rule = create_context_rule(&e);
+    let params = SessionAccountParams { allowed_fns: vec![&e, symbol_short!("swap")] };
+
+    e.as_contract(&address, || {
+        install(&e, &params, &context_rule, &smart_account);
+    });
+
+    e.as_contract(&address, || {
+        let fns = get_allowed_fns(&e, context_rule.id, &smart_account);
+        assert!(fns.contains(&symbol_short!("swap")));
+    });
+}
+
+#[test]
+fn reclaim_storage_on_absent_entry_is_idempotent() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        reclaim_storage(&e, &context_rule, &smart_account);
+
+        let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+        assert!(!e.storage().persistent().has(&key));
+    });
+}
+
+#[test]
+fn reclaim_storage_removes_installed_entry() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let context_rule = create_context_rule(&e);
+
+    e.mock_all_auths();
+
+    e.as_contract(&address, || {
+        let params = SessionAccountParams { allowed_fns: vec![&e, symbol_short!("set")] };
+        install(&e, &params, &context_rule, &smart_account);
+    });
+
+    e.as_contract(&address, || {
+        reclaim_storage(&e, &context_rule, &smart_account);
+
+        let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+        assert!(!e.storage().persistent().has(&key));
+    });
+}
+
+#[test]
+fn uninstall_expired_session_does_not_brick_when_entry_is_absent() {
+    let e = Env::default();
+    let address = e.register(MockContract, ());
+    let smart_account = Address::generate(&e);
+    let mut context_rule = create_context_rule(&e);
+    context_rule.valid_until = Some(50);
+
+    e.mock_all_auths();
+    e.ledger().with_mut(|li| li.sequence_number = 100);
+
+    // Even if storage entry already vanished/expired, uninstalling an expired
+    // session rule succeeds instead of permanently DoS-ing rule removal.
+    e.as_contract(&address, || {
+        uninstall(&e, &context_rule, &smart_account);
+    });
+}

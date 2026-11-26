@@ -51,6 +51,10 @@ impl MockToken {
     pub fn decimals(e: Env) -> u32 {
         e.storage().instance().get(&symbol_short!("decimals")).unwrap()
     }
+
+    pub fn balance(_e: Env, _id: Address) -> i128 {
+        0
+    }
 }
 
 fn setup_token(e: &Env, decimals: u32) -> Address {

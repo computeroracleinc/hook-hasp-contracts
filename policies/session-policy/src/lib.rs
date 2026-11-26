@@ -1,6 +1,7 @@
 #![no_std]
 
 mod allowlist;
+mod pruning;
 
 pub use allowlist::{
     SessionAccountParams, SessionData, SessionError, SessionRevoked, SessionStorageKey,
@@ -186,7 +187,22 @@ impl SessionPolicy {
     pub fn reclaim_storage(e: &Env, context_rule: ContextRule, smart_account: Address) {
         allowlist::reclaim_storage(e, &context_rule, &smart_account)
     }
+
+    /// Removes session-policy state for context rules whose `valid_until`
+    /// ledger has passed. The smart account must authorize the cleanup.
+    ///
+    /// Returns the number of policy entries removed.
+    pub fn prune_expired_sessions(
+        e: &Env,
+        context_rules: Vec<ContextRule>,
+        smart_account: Address,
+    ) -> u32 {
+        pruning::prune_expired_sessions(e, &context_rules, &smart_account)
+    }
 }
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod pruning_test;

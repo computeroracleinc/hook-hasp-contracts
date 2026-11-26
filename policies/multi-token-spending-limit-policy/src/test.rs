@@ -65,6 +65,10 @@ impl MockToken {
     pub fn decimals(e: Env) -> u32 {
         e.storage().instance().get(&symbol_short!("decimals")).unwrap()
     }
+
+    pub fn balance(_e: Env, _id: Address) -> i128 {
+        0
+    }
 }
 
 /// Registers a `MockToken` reporting `decimals`. Most tests use `0` so a raw
@@ -1117,3 +1121,55 @@ fn test_enforce_rejects_invalid_amount_arg_type() {
     client.enforce(&context, &Vec::new(&e), &rule, &smart_account);
 }
 
+
+// ################## SEP-41 INTERFACE & ROLLING WINDOW CONSTANTS ##################
+
+#[contract]
+struct PhantomTokenNoBalance;
+
+#[contractimpl]
+impl PhantomTokenNoBalance {
+    pub fn decimals(_e: Env) -> u32 {
+        7
+    }
+}
+
+#[contract]
+struct BadBalanceReturnToken;
+
+#[contractimpl]
+impl BadBalanceReturnToken {
+    pub fn decimals(_e: Env) -> u32 {
+        7
+    }
+
+    pub fn balance(_e: Env, _id: Address) -> bool {
+        true
+    }
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")] // InvalidTokenResponse
+fn test_install_rejects_phantom_token_without_balance() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let phantom = e.register(PhantomTokenNoBalance, ());
+
+    install_policy(&e, &client, &smart_account, &oracle, vec![&e, phantom], 1_000, 100);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")] // InvalidTokenResponse
+fn test_install_rejects_token_with_wrong_balance_return_type() {
+    let (e, smart_account, client) = setup_env();
+    let oracle = setup_oracle(&e, ONE_USD);
+    let bad_token = e.register(BadBalanceReturnToken, ());
+
+    install_policy(&e, &client, &smart_account, &oracle, vec![&e, bad_token], 1_000, 100);
+}
+
+#[test]
+fn test_window_constants_are_the_standard_rolling_windows() {
+    assert_eq!(crate::ROLLING_24_HOURS_LEDGERS, 17_280);
+    assert_eq!(crate::ROLLING_7_DAYS_LEDGERS, 120_960);
+}

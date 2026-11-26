@@ -68,7 +68,7 @@ use stellar_accounts::{
 };
 
 mod oracle;
-use oracle::{fetch_price, fetch_token_divisor, fetch_usd_divisor};
+use oracle::{fetch_price, fetch_token_divisor, fetch_usd_divisor, verify_token_interface};
 
 /// Error codes for the multi-token spending limit policy.
 ///
@@ -194,6 +194,12 @@ pub enum DataKey {
 const DAY_IN_LEDGERS: u32 = 17280;
 const POLICY_EXTEND_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
 const POLICY_TTL_THRESHOLD: u32 = POLICY_EXTEND_AMOUNT - DAY_IN_LEDGERS;
+
+/// Rolling **24-hour** spending window, in ledgers (17,280 ledgers at ~5 s/ledger).
+pub const ROLLING_24_HOURS_LEDGERS: u32 = DAY_IN_LEDGERS;
+
+/// Rolling **7-day** spending window, in ledgers (120,960 ledgers).
+pub const ROLLING_7_DAYS_LEDGERS: u32 = 7 * DAY_IN_LEDGERS;
 
 /// Maximum number of spending entries to keep in history. Bounds the storage
 /// size and the linear eviction scan performed on every `enforce` call.
@@ -322,6 +328,7 @@ impl Policy for MultiTokenSpendingLimitPolicy {
 
         let mut token_divisors = Vec::new(e);
         for token in install_params.allowed_tokens.iter() {
+            verify_token_interface(e, &token);
             token_divisors.push_back(fetch_token_divisor(e, &token));
         }
 
@@ -337,6 +344,7 @@ impl Policy for MultiTokenSpendingLimitPolicy {
         };
 
         e.storage().persistent().set(&key, &data);
+        e.storage().persistent().extend_ttl(&key, POLICY_TTL_THRESHOLD, POLICY_EXTEND_AMOUNT);
     }
 
     /// Removes all stored policy data for this smart account and context
@@ -492,6 +500,7 @@ impl Policy for MultiTokenSpendingLimitPolicy {
 
         let key = DataKey::AccountContext(smart_account, context_rule.id);
         e.storage().persistent().set(&key, &data);
+        e.storage().persistent().extend_ttl(&key, POLICY_TTL_THRESHOLD, POLICY_EXTEND_AMOUNT);
     }
 }
 

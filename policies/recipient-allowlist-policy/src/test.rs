@@ -3,15 +3,26 @@ extern crate std;
 
 use soroban_sdk::{
     auth::{Context, ContractContext},
-    testutils::Address as _,
+    testutils::{Address as _, Ledger as _},
     vec, Address, Env, IntoVal, Symbol, Val, Vec,
 };
 use stellar_accounts::smart_account::{ContextRule, ContextRuleType, Signer};
 
 use crate::{
-    RecipientAccountParams, RecipientAllowlistPolicy, RecipientAllowlistPolicyClient,
-    MAX_ALLOWED_RECIPIENTS,
+    is_valid_address_strkey, RecipientAccountParams, RecipientAllowlistPolicy,
+    RecipientAllowlistPolicyClient, MAX_ALLOWED_RECIPIENTS,
 };
+
+const CONTRACT_STRKEY: &[u8; 56] = b"CABX7KCI2S6QH3SG6TBFG3XUKNBWIBPDVRXSECJSRRZQQUYXNVVKO44L";
+const ACCOUNT_STRKEY: &[u8; 56] = b"GCOWPY2RHD6Y764NAEIB2SMJITDJLAJ7X4WVAQWQQKQTPRNRQKMT2W5K";
+
+fn strkey_bytes(address: &Address) -> [u8; 56] {
+    let encoded = address.to_string().to_bytes();
+    assert_eq!(encoded.len(), 56);
+    let mut buf = [0u8; 56];
+    encoded.copy_into_slice(&mut buf);
+    buf
+}
 
 fn create_context_rule(e: &Env) -> ContextRule {
     let signer = Address::generate(e);
@@ -352,3 +363,171 @@ fn test_set_allowed_recipients_rejects_not_installed() {
     client.set_allowed_recipients(&vec![&e, recipient], &rule.id, &smart_account);
 }
 
+
+// ################## STORAGE TTL / EXPIRY THRESHOLD TESTS (#187) ##################
+
+const RECIPIENT_NEAR_EXPIRY_LEDGER: u32 = 501_000;
+
+#[test]
+fn get_allowed_recipients_near_ttl_threshold_renews_and_succeeds() {
+    let (e, smart_account, client) = setup_env();
+
+    let rule = create_context_rule(&e);
+    let recipient = Address::generate(&e);
+    let allowed_recipients = vec![&e, recipient];
+
+    client.install(
+        &RecipientAccountParams { allowed_recipients: allowed_recipients.clone() },
+        &rule,
+        &smart_account,
+    );
+
+    e.ledger().with_mut(|li| {
+        li.sequence_number = RECIPIENT_NEAR_EXPIRY_LEDGER;
+        li.max_entry_ttl = 6_312_000;
+        li.min_persistent_entry_ttl = 1;
+    });
+
+    let result = client.get_allowed_recipients(&rule.id, &smart_account);
+    assert_eq!(result, allowed_recipients);
+}
+
+#[test]
+fn install_at_high_ledger_sequence_succeeds() {
+    let (e, smart_account, client) = setup_env();
+
+    e.ledger().with_mut(|li| {
+        li.sequence_number = 1_000_000;
+        li.max_entry_ttl = 6_312_000;
+        li.min_persistent_entry_ttl = 1;
+    });
+
+    let rule = create_context_rule(&e);
+    let recipient = Address::generate(&e);
+    let allowed_recipients = vec![&e, recipient];
+
+    client.install(
+        &RecipientAccountParams { allowed_recipients: allowed_recipients.clone() },
+        &rule,
+        &smart_account,
+    );
+
+    let result = client.get_allowed_recipients(&rule.id, &smart_account);
+    assert_eq!(result, allowed_recipients);
+}
+
+#[test]
+fn reclaim_storage_on_absent_entry_is_idempotent() {
+    let (e, smart_account, client) = setup_env();
+    let rule = create_context_rule(&e);
+
+    client.reclaim_storage(&rule.id, &smart_account);
+
+    let res = client.try_get_allowed_recipients(&rule.id, &smart_account);
+    assert!(res.is_err());
+}
+
+#[test]
+fn reclaim_storage_removes_installed_entry() {
+    let (e, smart_account, client) = setup_env();
+
+    let rule = create_context_rule(&e);
+    let allowed_recipients = vec![&e, Address::generate(&e)];
+
+    client.install(&RecipientAccountParams { allowed_recipients }, &rule, &smart_account);
+    client.reclaim_storage(&rule.id, &smart_account);
+
+    let res = client.try_get_allowed_recipients(&rule.id, &smart_account);
+    assert!(res.is_err());
+}
+
+// ################## ADDRESS SANITIZATION / CHECKSUMS (#189) ##################
+
+#[test]
+fn test_strkey_validation_accepts_contract_and_account_ids() {
+    assert!(is_valid_address_strkey(CONTRACT_STRKEY));
+    assert!(is_valid_address_strkey(ACCOUNT_STRKEY));
+}
+
+#[test]
+fn test_strkey_validation_accepts_live_addresses() {
+    let e = Env::default();
+
+    for _ in 0..4 {
+        assert!(is_valid_address_strkey(&strkey_bytes(&Address::generate(&e))));
+    }
+
+    let account = Address::from_str(&e, std::str::from_utf8(ACCOUNT_STRKEY).unwrap());
+    assert!(is_valid_address_strkey(&strkey_bytes(&account)));
+}
+
+#[test]
+fn test_strkey_validation_rejects_bad_checksum() {
+    let mut corrupted = *CONTRACT_STRKEY;
+    corrupted[55] = if corrupted[55] == b'A' { b'B' } else { b'A' };
+    assert!(!is_valid_address_strkey(&corrupted));
+}
+
+#[test]
+fn test_strkey_validation_rejects_tampered_payload() {
+    let mut tampered = *ACCOUNT_STRKEY;
+    tampered[20] = if tampered[20] == b'Q' { b'R' } else { b'Q' };
+    assert!(!is_valid_address_strkey(&tampered));
+}
+
+#[test]
+fn test_strkey_validation_rejects_wrong_prefix() {
+    let mut muxed = *ACCOUNT_STRKEY;
+    muxed[0] = b'M';
+    assert!(!is_valid_address_strkey(&muxed));
+
+    let mut contract = *CONTRACT_STRKEY;
+    contract[0] = b'A';
+    assert!(!is_valid_address_strkey(&contract));
+}
+
+#[test]
+fn test_strkey_validation_rejects_bad_length() {
+    let mut short: std::vec::Vec<u8> = CONTRACT_STRKEY.to_vec();
+    short.pop();
+    assert!(!is_valid_address_strkey(&short));
+
+    let mut long: std::vec::Vec<u8> = CONTRACT_STRKEY.to_vec();
+    long.push(b'A');
+    assert!(!is_valid_address_strkey(&long));
+
+    assert!(!is_valid_address_strkey(b""));
+}
+
+#[test]
+fn test_strkey_validation_rejects_non_base32_character() {
+    let mut bad = *CONTRACT_STRKEY;
+    bad[10] = b'1';
+    assert!(!is_valid_address_strkey(&bad));
+}
+
+#[test]
+fn test_strkey_validation_rejects_non_canonical_version_byte() {
+    let mut bad = *CONTRACT_STRKEY;
+    bad[1] = b'I';
+    assert!(!is_valid_address_strkey(&bad));
+}
+
+#[test]
+fn test_install_accepts_account_and_contract_recipients() {
+    let (e, smart_account, client) = setup_env();
+
+    let rule = create_context_rule(&e);
+    let account_recipient = Address::from_str(&e, std::str::from_utf8(ACCOUNT_STRKEY).unwrap());
+    let contract_recipient = Address::generate(&e);
+
+    let allowed_recipients = vec![&e, account_recipient, contract_recipient];
+
+    client.install(
+        &RecipientAccountParams { allowed_recipients: allowed_recipients.clone() },
+        &rule,
+        &smart_account,
+    );
+
+    assert_eq!(client.get_allowed_recipients(&rule.id, &smart_account), allowed_recipients);
+}

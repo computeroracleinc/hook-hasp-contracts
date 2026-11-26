@@ -61,6 +61,22 @@ pub fn fetch_usd_divisor(e: &Env, oracle_address: &Address) -> i128 {
         .unwrap_or_else(|| panic_with_error!(e, Error::InvalidOracleResponse))
 }
 
+/// Verifies that `token` implements the standard SEP-41 token interface by
+/// probing its `balance(id)` entrypoint. A contract lacking `balance` or
+/// returning a non-`i128` value fails closed with
+/// [`Error::InvalidTokenResponse`].
+pub fn verify_token_interface(e: &Env, token: &Address) {
+    let probe_addr = e.current_contract_address();
+    let result = e.try_invoke_contract::<i128, soroban_sdk::InvokeError>(
+        token,
+        &symbol_short!("balance"),
+        soroban_sdk::vec![e, probe_addr.into_val(e)],
+    );
+    if !matches!(result, Ok(Ok(_))) {
+        panic_with_error!(e, Error::InvalidTokenResponse)
+    }
+}
+
 /// Queries a token contract's `decimals()` and converts it into the base-10
 /// divisor `10.pow(decimals)` used to turn a raw `transfer` amount (in the
 /// token's own smallest unit) into a whole-token count during USD accounting.

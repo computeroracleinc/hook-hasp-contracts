@@ -186,7 +186,12 @@ pub fn check_policy(
     fn_name: &Symbol,
 ) -> (bool, bool) {
     let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule_id);
-    let Some(data) = e.storage().persistent().get::<_, SessionData>(&key) else {
+    let data = e
+        .storage()
+        .persistent()
+        .get::<_, SessionData>(&key)
+        .or_else(|| e.storage().temporary().get::<_, SessionData>(&key));
+    let Some(data) = data else {
         return (false, false);
     };
     let fn_allowed = data.allowed_fns.contains(fn_name);
@@ -194,28 +199,19 @@ pub fn check_policy(
     (would_pass, fn_allowed)
 }
 
-/// Retrieves the allowlist for a smart account's session policy.
-///
-/// # Arguments
-///
-/// * `e` - Access to the Soroban environment.
-/// * `context_rule_id` - The context rule ID for this policy.
-/// * `smart_account` - The address of the smart account.
-///
-/// # Errors
-///
-/// * [`SessionError::SmartAccountNotInstalled`] - When the smart account does
-///   not have a session policy installed.
+/// Retrieves the allowlist for a smart account's session policy without
+/// performing any unauthenticated storage mutations (only TTL extension).
 pub fn get_allowed_fns(e: &Env, context_rule_id: u32, smart_account: &Address) -> Vec<Symbol> {
     let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule_id);
-    e.storage()
-        .persistent()
-        .get::<_, SessionData>(&key)
-        .inspect(|_| {
-            e.storage().persistent().extend_ttl(&key, SESSION_TTL_THRESHOLD, SESSION_EXTEND_AMOUNT);
-        })
-        .map(|data| data.allowed_fns)
-        .unwrap_or_else(|| panic_with_error!(e, SessionError::SmartAccountNotInstalled))
+    if let Some(data) = e.storage().persistent().get::<_, SessionData>(&key) {
+        e.storage().persistent().extend_ttl(&key, SESSION_TTL_THRESHOLD, SESSION_EXTEND_AMOUNT);
+        return data.allowed_fns;
+    }
+    if let Some(data) = e.storage().temporary().get::<_, SessionData>(&key) {
+        e.storage().temporary().extend_ttl(&key, SESSION_TTL_THRESHOLD, SESSION_EXTEND_AMOUNT);
+        return data.allowed_fns;
+    }
+    panic_with_error!(e, SessionError::SmartAccountNotInstalled)
 }
 
 /// Returns whether a session ID has been revoked for the given smart account.
@@ -356,33 +352,28 @@ pub fn create_session(
 
     let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
 
-    if e.storage().persistent().has(&key) {
+    if e.storage().persistent().has(&key) || e.storage().temporary().has(&key) {
         panic_with_error!(e, SessionError::AlreadyInstalled)
     }
 
     let data = SessionData { allowed_fns: params.allowed_fns.clone() };
 
     e.storage().persistent().set(&key, &data);
+    e.storage().persistent().extend_ttl(&key, SESSION_TTL_THRESHOLD, SESSION_EXTEND_AMOUNT);
 
     emit_session_created(e, smart_account, context_rule.id, &params.allowed_fns);
 }
 
-/// Reclaims all persistent storage associated with the session policy for the
-/// given smart account and context rule. Unlike [`uninstall`], this is
-/// idempotent: it succeeds even when the entry is already absent or has
-/// expired, allowing users to reclaim storage rent without a live entry.
-/// Requires authorization from the smart account.
-///
-/// # Arguments
-///
-/// * `e` - Access to the Soroban environment.
-/// * `context_rule` - The context rule for this policy.
-/// * `smart_account` - The address of the smart account.
+/// Reclaims all persistent and temporary storage associated with the session
+/// policy for the given smart account and context rule. Unlike [`uninstall`],
+/// this is idempotent: it succeeds even when the entry is already absent or
+/// has expired. Requires authorization from the smart account.
 pub fn reclaim_storage(e: &Env, context_rule: &ContextRule, smart_account: &Address) {
     smart_account.require_auth();
 
     let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
     e.storage().persistent().remove(&key);
+    e.storage().temporary().remove(&key);
 }
 
 /// Installs the session policy on a smart account. This is the path used by
@@ -436,12 +427,18 @@ pub fn uninstall(e: &Env, context_rule: &ContextRule, smart_account: &Address) {
     smart_account.require_auth();
 
     let key = SessionStorageKey::AccountContext(smart_account.clone(), context_rule.id);
+    let has_entry = e.storage().persistent().has(&key) || e.storage().temporary().has(&key);
+    let is_expired_rule =
+        matches!(context_rule.valid_until, Some(valid_until) if e.ledger().sequence() > valid_until);
 
-    if !e.storage().persistent().has(&key) {
+    // Do not brick `remove_policy` / `remove_context_rule` when an expired
+    // session's storage entry has already been pruned or expired.
+    if !has_entry && !is_expired_rule {
         panic_with_error!(e, SessionError::SmartAccountNotInstalled)
     }
 
     e.storage().persistent().remove(&key);
+    e.storage().temporary().remove(&key);
 
     emit_session_revoked(e, smart_account, context_rule.id);
 }

@@ -545,6 +545,123 @@ fn test_enforce_fails_index_out_of_bounds() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_enforce_fails_index_out_of_bounds_on_empty_args() {
+    let (e, smart_account, _, target, policy_id) = setup();
+    let rule = create_context_rule(&e, &target);
+
+    let mut conditions = Map::new(&e);
+    conditions.set(
+        Symbol::new(&e, "swap"),
+        Vec::from_array(
+            &e,
+            [Condition {
+                arg_index: 0,
+                operator: Operator::Eq,
+                expected_value: ExpectedValue::U32(100),
+            }],
+        ),
+    );
+
+    e.as_contract(&policy_id, || {
+        conditions::install(
+            &e,
+            &ParameterScopedAccountParams { conditions },
+            &rule,
+            &smart_account,
+        );
+    });
+
+    let context = create_contract_context(&e, &target, "swap", Vec::new(&e));
+    let signers = Vec::from_array(&e, [Signer::Delegated(Address::generate(&e))]);
+
+    e.as_contract(&policy_id, || {
+        conditions::enforce(&e, &context, &signers, &rule, &smart_account);
+    });
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_enforce_fails_extreme_index_out_of_bounds() {
+    let (e, smart_account, _, target, policy_id) = setup();
+    let rule = create_context_rule(&e, &target);
+
+    let mut conditions = Map::new(&e);
+    conditions.set(
+        Symbol::new(&e, "swap"),
+        Vec::from_array(
+            &e,
+            [Condition {
+                arg_index: u32::MAX,
+                operator: Operator::Eq,
+                expected_value: ExpectedValue::U32(100),
+            }],
+        ),
+    );
+
+    e.as_contract(&policy_id, || {
+        conditions::install(
+            &e,
+            &ParameterScopedAccountParams { conditions },
+            &rule,
+            &smart_account,
+        );
+    });
+
+    let context =
+        create_contract_context(&e, &target, "swap", Vec::from_array(&e, [100u32.into_val(&e)]));
+    let signers = Vec::from_array(&e, [Signer::Delegated(Address::generate(&e))]);
+
+    e.as_contract(&policy_id, || {
+        conditions::enforce(&e, &context, &signers, &rule, &smart_account);
+    });
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_enforce_fails_when_later_condition_is_out_of_bounds() {
+    let (e, smart_account, _, target, policy_id) = setup();
+    let rule = create_context_rule(&e, &target);
+
+    let mut conditions = Map::new(&e);
+    conditions.set(
+        Symbol::new(&e, "swap"),
+        Vec::from_array(
+            &e,
+            [
+                Condition {
+                    arg_index: 0,
+                    operator: Operator::Eq,
+                    expected_value: ExpectedValue::U32(100),
+                },
+                Condition {
+                    arg_index: 3,
+                    operator: Operator::Eq,
+                    expected_value: ExpectedValue::U32(100),
+                },
+            ],
+        ),
+    );
+
+    e.as_contract(&policy_id, || {
+        conditions::install(
+            &e,
+            &ParameterScopedAccountParams { conditions },
+            &rule,
+            &smart_account,
+        );
+    });
+
+    let context =
+        create_contract_context(&e, &target, "swap", Vec::from_array(&e, [100u32.into_val(&e)]));
+    let signers = Vec::from_array(&e, [Signer::Delegated(Address::generate(&e))]);
+
+    e.as_contract(&policy_id, || {
+        conditions::enforce(&e, &context, &signers, &rule, &smart_account);
+    });
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #4)")]
 fn test_enforce_fails_unconfigured_function() {
     let (e, smart_account, _, target, policy_id) = setup();

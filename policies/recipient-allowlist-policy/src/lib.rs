@@ -86,6 +86,9 @@ pub enum RecipientError {
     AlreadyInstalled = 5,
     /// The call arguments could not be parsed to extract a recipient.
     InvalidTransferArgs = 6,
+    /// An allowlist entry is not a canonical, checksummed account (`G...`)
+    /// or contract (`C...`) strkey, so it cannot be used as a recipient.
+    InvalidRecipientAddress = 7,
 }
 
 /// Storage keys for recipient policy data.
@@ -104,6 +107,95 @@ pub const RECIPIENT_TTL_THRESHOLD: u32 = RECIPIENT_EXTEND_AMOUNT - DAY_IN_LEDGER
 /// Maximum number of allowed recipients per policy.
 /// Bounds the linear scan performed in `enforce` and the storage size.
 pub const MAX_ALLOWED_RECIPIENTS: u32 = 10;
+
+// ################## ADDRESS VALIDATION ##################
+
+const STRKEY_ENCODED_LEN: usize = 56;
+const STRKEY_DECODED_LEN: usize = 35;
+const STRKEY_CHECKSUMMED_LEN: usize = 33;
+const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+fn crc16_xmodem(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for &byte in data {
+        crc ^= u16::from(byte) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
+        }
+    }
+    crc
+}
+
+fn decode_base32(encoded: &[u8], out: &mut [u8]) -> bool {
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut written: usize = 0;
+
+    for &ch in encoded {
+        let Some(value) = BASE32_ALPHABET.iter().position(|&c| c == ch) else {
+            return false;
+        };
+        buffer = (buffer << 5) | value as u32;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            if written >= out.len() {
+                return false;
+            }
+            out[written] = ((buffer >> bits) & 0xff) as u8;
+            written += 1;
+            buffer &= (1 << bits) - 1;
+        }
+    }
+
+    written == out.len() && bits == 0 && buffer == 0
+}
+
+fn is_valid_address_strkey(encoded: &[u8]) -> bool {
+    if encoded.len() != STRKEY_ENCODED_LEN {
+        return false;
+    }
+
+    if encoded[0] != b'G' && encoded[0] != b'C' {
+        return false;
+    }
+
+    let mut decoded = [0u8; STRKEY_DECODED_LEN];
+    if !decode_base32(encoded, &mut decoded) {
+        return false;
+    }
+
+    if decoded[0] & 0x07 != 0 {
+        return false;
+    }
+
+    let checksum = crc16_xmodem(&decoded[..STRKEY_CHECKSUMMED_LEN]);
+    decoded[STRKEY_CHECKSUMMED_LEN] == (checksum & 0xff) as u8
+        && decoded[STRKEY_CHECKSUMMED_LEN + 1] == (checksum >> 8) as u8
+}
+
+fn validate_recipient_address(address: &Address) -> Result<(), RecipientError> {
+    let encoded = address.to_string().to_bytes();
+    if encoded.len() as usize != STRKEY_ENCODED_LEN {
+        return Err(RecipientError::InvalidRecipientAddress);
+    }
+
+    let mut buf = [0u8; STRKEY_ENCODED_LEN];
+    encoded.copy_into_slice(&mut buf);
+
+    if is_valid_address_strkey(&buf) {
+        Ok(())
+    } else {
+        Err(RecipientError::InvalidRecipientAddress)
+    }
+}
+
+fn validate_allowed_recipients(e: &Env, recipients: &Vec<Address>) {
+    for recipient in recipients.iter() {
+        validate_recipient_address(&recipient)
+            .unwrap_or_else(|_| panic_with_error!(e, RecipientError::InvalidRecipientAddress));
+    }
+}
 
 // ################## HELPER ##################
 fn emit_recipient_enforced(
@@ -257,6 +349,8 @@ impl Policy for RecipientAllowlistPolicy {
             panic_with_error!(e, RecipientError::InvalidAllowedRecipients)
         }
 
+        validate_allowed_recipients(e, &params.allowed_recipients);
+
         let key = RecipientStorageKey::AccountContext(smart_account.clone(), context_rule.id);
 
         if e.storage().persistent().has(&key) {
@@ -266,6 +360,11 @@ impl Policy for RecipientAllowlistPolicy {
         let data = RecipientData { allowed_recipients: params.allowed_recipients.clone() };
 
         e.storage().persistent().set(&key, &data);
+        e.storage().persistent().extend_ttl(
+            &key,
+            RECIPIENT_TTL_THRESHOLD,
+            RECIPIENT_EXTEND_AMOUNT,
+        );
 
         emit_recipient_installed(e, &smart_account, context_rule.id, &params.allowed_recipients);
     }
@@ -368,6 +467,8 @@ impl RecipientAllowlistPolicy {
             panic_with_error!(&e, RecipientError::InvalidAllowedRecipients)
         }
 
+        validate_allowed_recipients(&e, &allowed_recipients);
+
         let key = RecipientStorageKey::AccountContext(smart_account.clone(), context_rule_id);
 
         if !e.storage().persistent().has(&key) {
@@ -377,6 +478,11 @@ impl RecipientAllowlistPolicy {
         let data = RecipientData { allowed_recipients: allowed_recipients.clone() };
 
         e.storage().persistent().set(&key, &data);
+        e.storage().persistent().extend_ttl(
+            &key,
+            RECIPIENT_TTL_THRESHOLD,
+            RECIPIENT_EXTEND_AMOUNT,
+        );
     }
 
     /// Reclaims all persistent storage associated with the recipient policy for
